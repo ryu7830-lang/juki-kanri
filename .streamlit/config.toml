@@ -1,0 +1,4 @@
+# Streamlitアプリの表示設定
+[client]
+# 右上ツールバー（GitHub/Forkバッジ・開発者メニュー等）を最小化して隠す
+toolbarMode = "minimal"

@@ -18,6 +18,12 @@ st.markdown("""
 <style>
 .stButton > button { font-size: 16px; padding: 0.6rem 1rem; }
 .block-container { padding-top: 2rem; }
+/* 右上のGitHub/Forkバッジ・ツールバー・デコレーション・フッターを非表示 */
+[data-testid="stToolbar"] { visibility: hidden; height: 0; }
+.stAppDeployButton { display: none; }
+[data-testid="stDecoration"] { display: none; }
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
