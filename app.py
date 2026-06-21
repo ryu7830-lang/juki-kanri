@@ -24,12 +24,7 @@ st.markdown("""
 [data-testid="stDecoration"] { display: none; }
 #MainMenu { visibility: hidden; }
 footer { visibility: hidden; }
-/* 右下のStreamlitホスティングバッジを隠す試行（自動生成クラスのため幅広く指定） */
-[data-testid="stAppViewerBadge"] { display: none !important; }
-[class*="viewerBadge"] { display: none !important; }
-.styles_viewerBadge__CvC9N { display: none !important; }
-a[href*="streamlit.io"] { display: none !important; }
-a[href*="share.streamlit.io"] { display: none !important; }
+/* 右下のStreamlit製バッジは無料ホスティング層（アプリ外）にあり、CSSでは消せないため対応しない */
 </style>
 """, unsafe_allow_html=True)
 
