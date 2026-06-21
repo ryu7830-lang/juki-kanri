@@ -1,0 +1,19 @@
+# 認証情報・秘密（万一ここに置かれても上げない。実体は ~/.config/juki-kanri/）
+*token*.json
+*client_secret*.json
+oauth_client.json
+config.json
+secrets.toml
+.streamlit/secrets.toml
+
+# Python環境・キャッシュ
+.venv/
+__pycache__/
+*.pyc
+
+# 旧SQLite・写真・ローカルデータ
+data/
+*.db
+
+# OS
+.DS_Store
