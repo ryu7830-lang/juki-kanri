@@ -7,6 +7,7 @@
   → 旧フル機能は app_sqlite_backup.py に保存済み。
 """
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import date
 import sheets_backend as db
 
@@ -173,7 +174,9 @@ if page == "一覧":
             icon = STATUS_ICONS.get(m["status"], "⚪")
             with st.container(border=True):
                 disp = f"~~{m['name']}~~" if m["is_disposed"] else f"**{m['name']}**"
-                st.markdown(f"{disp}　{icon} {m['status']}")
+                # 各カードに不可視アンカー（戻ったときここへスクロールする目印）
+                st.markdown(f'<span id="machine-{m["id"]}"></span>{disp}　{icon} {m["status"]}',
+                            unsafe_allow_html=True)
                 st.caption(f"{m['category']}　|　{m['plate_number'] or 'ナンバー未登録'}　|　配備：{m['location']}")
                 for label, d in [("車検", m["next_shaken_date"]), ("自賠責", m["jibaiseki_expire"])]:
                     days = days_until(d)
@@ -184,6 +187,22 @@ if page == "一覧":
                             st.caption(f"📅 {label}まで{days}日")
                 if st.button("詳細を見る", key=f"b_{m['id']}", use_container_width=True):
                     nav("詳細", m["id"]); st.rerun()
+
+        # 詳細から「一覧に戻る」で戻ってきたとき、見ていた重機の位置まで自動スクロール
+        if st.session_state.get("scroll_back"):
+            tgt = st.session_state.pop("scroll_back")
+            components.html(
+                f"""<script>
+                const doc = window.parent.document;
+                function go() {{
+                    const el = doc.getElementById("machine-{tgt}");
+                    if (el) {{ el.scrollIntoView({{block: "center"}}); return true; }}
+                    return false;
+                }}
+                if (!go()) setTimeout(go, 200);
+                </script>""",
+                height=0,
+            )
 
 # =====================================================
 # 詳細
@@ -200,6 +219,7 @@ elif page == "詳細" and st.session_state.selected_machine_id:
     ops.sort(key=lambda o: sval(o.get("operation_date")), reverse=True)
 
     if st.button("← 一覧に戻る"):
+        st.session_state.scroll_back = mid  # 一覧で この重機の位置までスクロールさせる
         nav("一覧"); st.rerun()
     cur_status = sval(status.get("status")) if status else "未設定"
     icon = STATUS_ICONS.get(cur_status, "⚪")
