@@ -344,6 +344,12 @@ elif page == "詳細" and st.session_state.selected_machine_id:
                     })
                     st.success("登録しました"); nav("一覧"); st.rerun()
 
+    # 画面下にも「一覧に戻る」（長い詳細をスクロールした後でもすぐ戻れるように）
+    st.divider()
+    if st.button("← 一覧に戻る", key="back_bottom", use_container_width=True):
+        st.session_state.scroll_back = mid
+        nav("一覧"); st.rerun()
+
 # =====================================================
 # 新規登録
 # =====================================================
