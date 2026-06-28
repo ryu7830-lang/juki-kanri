@@ -173,12 +173,14 @@ page = st.session_state.page
 # =====================================================
 if page == "一覧":
     st.subheader("重機一覧")
-    c1, c2 = st.columns(2)
+    # カテゴリはタップですぐ切り替わるボタン（ピル）型。再タップ/「すべて」で解除
+    filter_cat = st.pills("カテゴリ", ["すべて"] + CATEGORIES,
+                          selection_mode="single", default="すべて", key="fc") or "すべて"
+    c1, c2 = st.columns([3, 2])
     with c1:
-        filter_cat = st.selectbox("カテゴリ", ["すべて"] + CATEGORIES, key="fc")
-    with c2:
         filter_status = st.selectbox("状態", ["すべて"] + STATUSES, key="fs")
-    show_disposed = st.checkbox("廃車済みも表示", value=False)
+    with c2:
+        show_disposed = st.checkbox("廃車済みも表示", value=False)
 
     machines = db.read("machines")
     statuses = {sval(s.get("machine_id")): s for s in db.read("machine_status")}
