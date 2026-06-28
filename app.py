@@ -8,6 +8,7 @@
 """
 import streamlit as st
 import streamlit.components.v1 as components
+import json
 from datetime import date
 import sheets_backend as db
 
@@ -36,6 +37,14 @@ CATEGORIES   = ["家畜車", "ダンプ", "トラック", "タイヤショベル
 STATUSES     = ["稼働中", "待機中", "整備中", "車検中", "廃車"]
 RECORD_TYPES = ["定期点検", "修理", "車検", "燃料補給", "オイル交換", "タイヤ交換", "バッテリー交換", "その他"]
 STATUS_ICONS = {"稼働中": "🟢", "待機中": "🔵", "整備中": "🟡", "車検中": "🟠", "廃車": "⚫", "未設定": "⚪"}
+
+# --- 施設（建物・設備）用の定数 ---
+FACILITY_CATEGORIES   = ["牛舎", "堆肥舎", "飼料倉庫", "事務所", "機械庫", "その他"]
+FACILITY_STATUSES     = ["使用中", "一部使用", "休止中", "解体予定"]
+FACILITY_RECORD_TYPES = ["法定点検", "定期点検", "修繕", "設備更新", "その他"]
+FACILITY_STATUS_ICONS = {"使用中": "🟢", "一部使用": "🟡", "休止中": "⚪", "解体予定": "⚫", "未設定": "⚪"}
+# 法定点検の枠（ラベル, facility_statusの期限カラム名）
+LEGAL_CHECKS = [("消防設備", "fire_expire"), ("電気設備", "electrical_expire"), ("浄化槽", "septic_expire")]
 
 
 # =====================================================
@@ -89,28 +98,72 @@ def parse_date(s):
 # =====================================================
 # 画面遷移
 # =====================================================
-for k, v in [("page", "一覧"), ("selected_machine_id", None)]:
+for k, v in [("page", "一覧"), ("selected_machine_id", None),
+             ("mode", "machine"), ("selected_facility_id", None)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
 
-def nav(page, machine_id=None):
+def nav(page, machine_id=None, facility_id=None):
     st.session_state.page = page
     if machine_id is not None:
         st.session_state.selected_machine_id = machine_id
+    if facility_id is not None:
+        st.session_state.selected_facility_id = facility_id
+
+
+def scroll_restore(prefix):
+    """詳細から戻ってきたとき、見ていた行（{prefix}-{id}）の位置までスクロール。"""
+    key = "scroll_back"
+    if st.session_state.get(key):
+        tgt = f"{prefix}-{st.session_state.pop(key)}"
+        components.html(
+            f"""<script>
+            const doc = window.parent.document;
+            function go() {{
+                const el = doc.getElementById({json.dumps(tgt)});
+                if (el) {{ el.scrollIntoView({{block: "center"}}); return true; }}
+                return false;
+            }}
+            if (!go()) setTimeout(go, 200);
+            </script>""",
+            height=0,
+        )
 
 
 # =====================================================
 # ヘッダーナビ（スマホ向けに2ボタンへ削減）
 # =====================================================
-st.title("🚜 重機管理")
-c1, c2 = st.columns(2)
-with c1:
-    if st.button("📋 一覧", use_container_width=True):
-        nav("一覧"); st.rerun()
-with c2:
-    if st.button("➕ 新規登録", use_container_width=True):
-        nav("登録"); st.rerun()
+st.title("🚜 重機・施設管理")
+
+# 重機 / 施設 の切替（選択中を強調）
+mode = st.session_state.get("mode", "machine")
+mc1, mc2 = st.columns(2)
+with mc1:
+    if st.button("🚜 重機", use_container_width=True,
+                 type=("primary" if mode == "machine" else "secondary")):
+        st.session_state.mode = "machine"; nav("一覧"); st.rerun()
+with mc2:
+    if st.button("🏢 施設", use_container_width=True,
+                 type=("primary" if mode == "facility" else "secondary")):
+        st.session_state.mode = "facility"; nav("施設一覧"); st.rerun()
+
+# モード内のナビ
+n1, n2 = st.columns(2)
+if mode == "machine":
+    with n1:
+        if st.button("📋 一覧", use_container_width=True):
+            nav("一覧"); st.rerun()
+    with n2:
+        if st.button("➕ 新規登録", use_container_width=True):
+            nav("登録"); st.rerun()
+else:
+    with n1:
+        if st.button("📋 施設一覧", use_container_width=True):
+            nav("施設一覧"); st.rerun()
+    with n2:
+        if st.button("➕ 施設を登録", use_container_width=True):
+            nav("施設登録"); st.rerun()
 st.divider()
 
 page = st.session_state.page
@@ -188,21 +241,8 @@ if page == "一覧":
                 if st.button("詳細を見る", key=f"b_{m['id']}", use_container_width=True):
                     nav("詳細", m["id"]); st.rerun()
 
-        # 詳細から「一覧に戻る」で戻ってきたとき、見ていた重機の位置まで自動スクロール
-        if st.session_state.get("scroll_back"):
-            tgt = st.session_state.pop("scroll_back")
-            components.html(
-                f"""<script>
-                const doc = window.parent.document;
-                function go() {{
-                    const el = doc.getElementById("machine-{tgt}");
-                    if (el) {{ el.scrollIntoView({{block: "center"}}); return true; }}
-                    return false;
-                }}
-                if (!go()) setTimeout(go, 200);
-                </script>""",
-                height=0,
-            )
+        # 詳細から戻ってきたとき、見ていた重機の位置まで自動スクロール
+        scroll_restore("machine")
 
 # =====================================================
 # 詳細
@@ -557,5 +597,322 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
                 })
                 st.success("更新しました！"); nav("詳細"); st.rerun()
 
+# =====================================================
+# 🏢 施設：一覧
+# =====================================================
+elif page == "施設一覧":
+    st.subheader("施設一覧")
+    c1, c2 = st.columns(2)
+    with c1:
+        f_cat = st.selectbox("種類", ["すべて"] + FACILITY_CATEGORIES, key="ffc")
+    with c2:
+        f_status = st.selectbox("状態", ["すべて"] + FACILITY_STATUSES, key="ffs")
+    show_removed = st.checkbox("解体・廃止も表示", value=False, key="fshow")
+
+    facilities = db.read("facilities")
+    fstatuses = {sval(s.get("facility_id")): s for s in db.read("facility_status")}
+
+    rows = []
+    for f in facilities:
+        fid = sval(f.get("id"))
+        s = fstatuses.get(fid, {})
+        removed = to_int(f.get("is_disposed")) == 1
+        status = sval(s.get("status")) or "未設定"
+        if not show_removed and removed:
+            continue
+        if f_cat != "すべて" and sval(f.get("category")) != f_cat:
+            continue
+        if f_status != "すべて" and status != f_status:
+            continue
+        checks = [(lbl, s.get(col)) for lbl, col in LEGAL_CHECKS]
+        checks.append((sval(s.get("other_name")) or "その他", s.get("other_expire")))
+        rows.append({
+            "id": fid, "name": sval(f.get("name")), "category": sval(f.get("category")),
+            "removed": removed, "status": status,
+            "location": sval(s.get("location")) or "未設定", "checks": checks,
+        })
+    rows.sort(key=lambda r: (r["category"], r["name"]))
+
+    if not rows:
+        st.info("該当する施設がありません。「➕ 施設を登録」から追加してください。")
+    else:
+        alerts = []
+        for f in rows:
+            for label, d in f["checks"]:
+                days = days_until(d)
+                if days is not None and days <= 30:
+                    alerts.append(f"⚠️ **{f['name']}** の{label}点検まで **{days}日**")
+        if alerts:
+            with st.expander(f"🚨 点検期限アラート {len(alerts)}件", expanded=True):
+                for a in alerts:
+                    st.markdown(a)
+
+        st.caption(f"全 {len(rows)} 施設")
+        for f in rows:
+            icon = FACILITY_STATUS_ICONS.get(f["status"], "⚪")
+            with st.container(border=True):
+                disp = f"~~{f['name']}~~" if f["removed"] else f"**{f['name']}**"
+                st.markdown(f'<span id="facility-{f["id"]}"></span>{disp}　{icon} {f["status"]}',
+                            unsafe_allow_html=True)
+                st.caption(f"{f['category']}　|　場所：{f['location']}")
+                for label, d in f["checks"]:
+                    days = days_until(d)
+                    if days is not None:
+                        if days <= 30:
+                            st.caption(f"⚠️ {label}点検まで{days}日")
+                        elif days <= 90:
+                            st.caption(f"📅 {label}点検まで{days}日")
+                if st.button("詳細を見る", key=f"fb_{f['id']}", use_container_width=True):
+                    nav("施設詳細", facility_id=f["id"]); st.rerun()
+        scroll_restore("facility")
+
+# =====================================================
+# 🏢 施設：詳細
+# =====================================================
+elif page == "施設詳細" and st.session_state.selected_facility_id:
+    fid = st.session_state.selected_facility_id
+    facility = db.get("facilities", fid)
+    if not facility:
+        nav("施設一覧"); st.rerun()
+    fstatus = db.find_one("facility_status", "facility_id", fid)
+    frecords = db.find_all("facility_records", "facility_id", fid)
+    frecords.sort(key=lambda r: sval(r.get("record_date")), reverse=True)
+
+    if st.button("← 施設一覧に戻る"):
+        st.session_state.scroll_back = fid
+        nav("施設一覧"); st.rerun()
+    cur_status = sval(fstatus.get("status")) if fstatus else "未設定"
+    icon = FACILITY_STATUS_ICONS.get(cur_status, "⚪")
+    st.subheader(f"🏢 {sval(facility.get('name'))}")
+    st.markdown(f"{icon} **{cur_status}**　|　{sval(facility.get('category'))}")
+    if to_int(facility.get("is_disposed")) == 1:
+        st.warning("この施設は廃止・解体済みです")
+
+    t1, t2, t3 = st.tabs(["📋 基本情報", "🔥 法定点検・状態", "🔧 点検・修繕記録"])
+
+    with t1:
+        for label, key in [("種類", "category"), ("面積(㎡)", "area"),
+                           ("収容頭数", "capacity"), ("建設年月", "built_date"),
+                           ("場所", "location")]:
+            st.markdown(f"**{label}**：{sval(facility.get(key)) or '未登録'}")
+        if sval(facility.get("notes")):
+            st.markdown(f"**メモ**：{sval(facility.get('notes'))}")
+        st.markdown("---")
+        if st.button("✏️ 基本情報を編集する", use_container_width=True):
+            nav("施設編集"); st.rerun()
+
+    with t2:
+        st.markdown(f"**状態**：{icon} {cur_status}")
+        st.markdown(f"**場所**：{(sval(fstatus.get('location')) if fstatus else '') or '未設定'}")
+        st.markdown("---")
+        st.markdown("**法定点検の期限**")
+
+        def show_check(label, key):
+            v = sval(fstatus.get(key)) if fstatus else ""
+            d = days_until(v)
+            extra = f"　⚠️ あと{d}日" if d is not None and d <= 30 else ""
+            st.markdown(f"・{label}：{v or '未設定'}{extra}")
+
+        for label, col in LEGAL_CHECKS:
+            show_check(label, col)
+        on = sval(fstatus.get("other_name")) if fstatus else ""
+        if on or (fstatus and sval(fstatus.get("other_expire"))):
+            show_check(on or "その他点検", "other_expire")
+        if fstatus and sval(fstatus.get("notes")):
+            st.markdown(f"**メモ**：{sval(fstatus.get('notes'))}")
+        st.markdown("---")
+        if st.button("📍 状態・点検期限を更新する", use_container_width=True, type="primary"):
+            nav("施設状態更新"); st.rerun()
+
+    with t3:
+        if st.button("➕ 記録を追加する", use_container_width=True, type="primary"):
+            nav("施設記録追加"); st.rerun()
+        st.markdown("---")
+        if frecords:
+            total_cost = sum(to_int(r.get("cost")) or 0 for r in frecords)
+            c1, c2 = st.columns(2)
+            c1.metric("記録件数", f"{len(frecords)}件")
+            c2.metric("累計費用", fmt_price(total_cost))
+            for r in frecords:
+                with st.container(border=True):
+                    st.markdown(f"**{sval(r.get('record_type'))}**　{sval(r.get('record_date'))}"
+                                + (f"　{fmt_price(r.get('cost'))}" if to_int(r.get('cost')) else ""))
+                    if sval(r.get("description")):
+                        st.write(sval(r.get("description")))
+                    caps = []
+                    if sval(r.get("worker")):
+                        caps.append(f"担当：{sval(r.get('worker'))}")
+                    if sval(r.get("next_scheduled_date")):
+                        caps.append(f"次回予定：{sval(r.get('next_scheduled_date'))}")
+                    for cap in caps:
+                        st.caption(cap)
+        else:
+            st.info("記録がまだありません")
+
+    st.divider()
+    if st.button("← 施設一覧に戻る", key="fback_bottom", use_container_width=True):
+        st.session_state.scroll_back = fid
+        nav("施設一覧"); st.rerun()
+
+# =====================================================
+# 🏢 施設：新規登録
+# =====================================================
+elif page == "施設登録":
+    st.subheader("➕ 施設を新規登録")
+    if st.button("← 施設一覧に戻る"):
+        nav("施設一覧"); st.rerun()
+
+    with st.form("f_register", clear_on_submit=True):
+        st.markdown("#### 基本情報")
+        name = st.text_input("施設名 ＊必須", placeholder="例：第1肥育牛舎")
+        category = st.selectbox("種類 ＊必須", FACILITY_CATEGORIES)
+        area = st.text_input("面積（㎡）", placeholder="例：1200")
+        capacity = st.text_input("収容頭数", placeholder="例：200")
+        built_date = st.text_input("建設年月", placeholder="例：2015-04")
+        location = st.text_input("場所", placeholder="例：本場")
+        notes = st.text_area("メモ")
+
+        st.markdown("#### 初期状態")
+        initial_status = st.selectbox("状態", FACILITY_STATUSES)
+
+        st.markdown("#### 法定点検の期限")
+        fire = st.date_input("消防設備点検 期限", value=None)
+        elec = st.date_input("電気設備点検 期限", value=None)
+        septic = st.date_input("浄化槽点検 期限", value=None)
+        other_name = st.text_input("その他点検の名称", placeholder="例：ボイラー")
+        other_exp = st.date_input("その他点検 期限", value=None)
+
+        if st.form_submit_button("✅ 登録する", use_container_width=True, type="primary"):
+            if not name.strip():
+                st.error("施設名を入力してください")
+            else:
+                new_id = db.insert("facilities", {
+                    "name": name.strip(), "category": category, "area": area or "",
+                    "capacity": capacity or "", "built_date": built_date or "",
+                    "location": location or "", "notes": notes or "", "is_disposed": 0,
+                })
+                db.insert("facility_status", {
+                    "facility_id": new_id, "status": initial_status, "location": location or "",
+                    "fire_expire": str(fire) if fire else "",
+                    "electrical_expire": str(elec) if elec else "",
+                    "septic_expire": str(septic) if septic else "",
+                    "other_name": other_name or "",
+                    "other_expire": str(other_exp) if other_exp else "",
+                })
+                st.success(f"「{name}」を登録しました！")
+                nav("施設詳細", facility_id=new_id); st.rerun()
+
+# =====================================================
+# 🏢 施設：状態・点検期限の更新
+# =====================================================
+elif page == "施設状態更新" and st.session_state.selected_facility_id:
+    fid = st.session_state.selected_facility_id
+    facility = db.get("facilities", fid)
+    fstatus = db.find_one("facility_status", "facility_id", fid)
+
+    if st.button("← 詳細に戻る"):
+        nav("施設詳細"); st.rerun()
+    st.subheader(f"📍 状態・点検期限の更新：{sval(facility.get('name'))}")
+
+    with st.form("f_status"):
+        cur = sval(fstatus.get("status")) if fstatus else ""
+        idx = FACILITY_STATUSES.index(cur) if cur in FACILITY_STATUSES else 0
+        new_status = st.selectbox("状態", FACILITY_STATUSES, index=idx)
+        new_location = st.text_input("場所", value=sval(fstatus.get("location")) if fstatus else "")
+        st.markdown("#### 法定点検の期限")
+        fire = st.date_input("消防設備点検 期限",
+                             value=parse_date(fstatus.get("fire_expire")) if fstatus else None)
+        elec = st.date_input("電気設備点検 期限",
+                             value=parse_date(fstatus.get("electrical_expire")) if fstatus else None)
+        septic = st.date_input("浄化槽点検 期限",
+                               value=parse_date(fstatus.get("septic_expire")) if fstatus else None)
+        other_name = st.text_input("その他点検の名称",
+                                   value=sval(fstatus.get("other_name")) if fstatus else "")
+        other_exp = st.date_input("その他点検 期限",
+                                  value=parse_date(fstatus.get("other_expire")) if fstatus else None)
+        new_notes = st.text_area("メモ", value=sval(fstatus.get("notes")) if fstatus else "")
+
+        if st.form_submit_button("✅ 更新する", use_container_width=True, type="primary"):
+            payload = {
+                "status": new_status, "location": new_location or "",
+                "fire_expire": str(fire) if fire else "",
+                "electrical_expire": str(elec) if elec else "",
+                "septic_expire": str(septic) if septic else "",
+                "other_name": other_name or "",
+                "other_expire": str(other_exp) if other_exp else "",
+                "notes": new_notes or "",
+            }
+            if fstatus:
+                db.update("facility_status", fstatus.get("id"), payload)
+            else:
+                db.insert("facility_status", {"facility_id": fid, **payload})
+            st.success("更新しました！"); nav("施設詳細"); st.rerun()
+
+# =====================================================
+# 🏢 施設：点検・修繕記録の追加
+# =====================================================
+elif page == "施設記録追加" and st.session_state.selected_facility_id:
+    fid = st.session_state.selected_facility_id
+    facility = db.get("facilities", fid)
+
+    if st.button("← 詳細に戻る"):
+        nav("施設詳細"); st.rerun()
+    st.subheader(f"🔧 記録追加：{sval(facility.get('name'))}")
+
+    with st.form("f_record", clear_on_submit=True):
+        record_type = st.selectbox("記録の種類", FACILITY_RECORD_TYPES)
+        record_date = st.date_input("実施日", value=date.today())
+        cost = st.number_input("費用（円）", min_value=0, step=1000, value=0)
+        worker = st.text_input("担当者・業者", placeholder="例：〇〇電気")
+        next_scheduled = st.date_input("次回予定日", value=None)
+        description = st.text_area("内容・詳細", placeholder="例：消防設備点検を実施、消火器2本を交換")
+        record_notes = st.text_area("その他メモ")
+
+        if st.form_submit_button("✅ 記録を保存する", use_container_width=True, type="primary"):
+            db.insert("facility_records", {
+                "facility_id": fid, "record_type": record_type, "record_date": str(record_date),
+                "description": description or "", "cost": cost if cost > 0 else "",
+                "worker": worker or "",
+                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                "notes": record_notes or "",
+            })
+            st.success("記録を保存しました！"); nav("施設詳細"); st.rerun()
+
+# =====================================================
+# 🏢 施設：基本情報編集
+# =====================================================
+elif page == "施設編集" and st.session_state.selected_facility_id:
+    fid = st.session_state.selected_facility_id
+    facility = db.get("facilities", fid)
+
+    if st.button("← 詳細に戻る"):
+        nav("施設詳細"); st.rerun()
+    st.subheader(f"✏️ 基本情報を編集：{sval(facility.get('name'))}")
+
+    with st.form("f_edit"):
+        name = st.text_input("施設名 ＊必須", value=sval(facility.get("name")))
+        cur_cat = sval(facility.get("category"))
+        cat_idx = FACILITY_CATEGORIES.index(cur_cat) if cur_cat in FACILITY_CATEGORIES else 0
+        category = st.selectbox("種類", FACILITY_CATEGORIES, index=cat_idx)
+        area = st.text_input("面積（㎡）", value=sval(facility.get("area")))
+        capacity = st.text_input("収容頭数", value=sval(facility.get("capacity")))
+        built_date = st.text_input("建設年月", value=sval(facility.get("built_date")))
+        location = st.text_input("場所", value=sval(facility.get("location")))
+        notes = st.text_area("メモ", value=sval(facility.get("notes")))
+        removed = st.checkbox("廃止・解体済みにする（一覧から非表示）",
+                              value=(to_int(facility.get("is_disposed")) == 1))
+
+        if st.form_submit_button("✅ 保存する", use_container_width=True, type="primary"):
+            if not name.strip():
+                st.error("施設名を入力してください")
+            else:
+                db.update("facilities", fid, {
+                    "name": name.strip(), "category": category, "area": area or "",
+                    "capacity": capacity or "", "built_date": built_date or "",
+                    "location": location or "", "notes": notes or "",
+                    "is_disposed": 1 if removed else 0,
+                })
+                st.success("更新しました！"); nav("施設詳細"); st.rerun()
+
 else:
-    nav("一覧"); st.rerun()
+    nav("施設一覧" if st.session_state.get("mode") == "facility" else "一覧"); st.rerun()
