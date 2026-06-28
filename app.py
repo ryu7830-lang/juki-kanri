@@ -604,12 +604,14 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
 # =====================================================
 elif page == "施設一覧":
     st.subheader("施設一覧")
-    c1, c2 = st.columns(2)
+    # 種類はタップ式ボタン（ピル）。再タップ/「すべて」で解除
+    f_cat = st.pills("種類", ["すべて"] + FACILITY_CATEGORIES,
+                     selection_mode="single", default="すべて", key="ffc") or "すべて"
+    c1, c2 = st.columns([3, 2])
     with c1:
-        f_cat = st.selectbox("種類", ["すべて"] + FACILITY_CATEGORIES, key="ffc")
-    with c2:
         f_status = st.selectbox("状態", ["すべて"] + FACILITY_STATUSES, key="ffs")
-    show_removed = st.checkbox("解体・廃止も表示", value=False, key="fshow")
+    with c2:
+        show_removed = st.checkbox("解体・廃止も表示", value=False, key="fshow")
 
     facilities = db.read("facilities")
     fstatuses = {sval(s.get("facility_id")): s for s in db.read("facility_status")}
@@ -737,13 +739,27 @@ elif page == "施設詳細" and st.session_state.selected_facility_id:
             c2.metric("累計費用", fmt_price(total_cost))
             for r in frecords:
                 with st.container(border=True):
-                    st.markdown(f"**{sval(r.get('record_type'))}**　{sval(r.get('record_date'))}"
-                                + (f"　{fmt_price(r.get('cost'))}" if to_int(r.get('cost')) else ""))
+                    # 日付（終了日があれば 開始〜終了 の期間表示）
+                    d1 = sval(r.get("record_date"))
+                    d2 = sval(r.get("end_date"))
+                    dstr = f"{d1} 〜 {d2}" if d2 else d1
+                    head = f"**{sval(r.get('record_type'))}**　{dstr}"
+                    if sval(r.get("repair_location")):
+                        head += f"　／ 箇所：{sval(r.get('repair_location'))}"
+                    if to_int(r.get("cost")):
+                        head += f"　{fmt_price(r.get('cost'))}"
+                    st.markdown(head)
                     if sval(r.get("description")):
                         st.write(sval(r.get("description")))
                     caps = []
+                    if sval(r.get("contractor_type")):
+                        caps.append(f"区分：{sval(r.get('contractor_type'))}")
                     if sval(r.get("worker")):
                         caps.append(f"担当：{sval(r.get('worker'))}")
+                    if sval(r.get("materials")):
+                        caps.append(f"部材：{sval(r.get('materials'))}")
+                    if sval(r.get("insurance")):
+                        caps.append(f"保険：{sval(r.get('insurance'))}")
                     if sval(r.get("next_scheduled_date")):
                         caps.append(f"次回予定：{sval(r.get('next_scheduled_date'))}")
                     for cap in caps:
@@ -863,20 +879,32 @@ elif page == "施設記録追加" and st.session_state.selected_facility_id:
 
     with st.form("f_record", clear_on_submit=True):
         record_type = st.selectbox("記録の種類", FACILITY_RECORD_TYPES)
-        record_date = st.date_input("実施日", value=date.today())
+        repair_location = st.text_input("修繕箇所", placeholder="例：屋根・給水管・換気扇")
+        c1, c2 = st.columns(2)
+        with c1:
+            record_date = st.date_input("開始日（実施日）", value=date.today())
+        with c2:
+            end_date = st.date_input("終了日（工事期間がある場合）", value=None)
+        contractor_type = st.radio("区分", ["自社", "外注"], horizontal=True)
+        worker = st.text_input("担当者・業者", placeholder="例：〇〇工務店 / 田中")
+        materials = st.text_area("部材", placeholder="例：トタン板10枚、ビス、塗料")
         cost = st.number_input("費用（円）", min_value=0, step=1000, value=0)
-        worker = st.text_input("担当者・業者", placeholder="例：〇〇電気")
+        insurance = st.text_input("保険", placeholder="例：火災保険適用（30万円）/ なし")
         next_scheduled = st.date_input("次回予定日", value=None)
-        description = st.text_area("内容・詳細", placeholder="例：消防設備点検を実施、消火器2本を交換")
+        description = st.text_area("内容・詳細", placeholder="例：台風で破損した屋根を補修")
         record_notes = st.text_area("その他メモ")
 
         if st.form_submit_button("✅ 記録を保存する", use_container_width=True, type="primary"):
             db.insert("facility_records", {
-                "facility_id": fid, "record_type": record_type, "record_date": str(record_date),
-                "description": description or "", "cost": cost if cost > 0 else "",
-                "worker": worker or "",
+                "facility_id": fid, "record_type": record_type,
+                "repair_location": repair_location or "",
+                "record_date": str(record_date),
+                "end_date": str(end_date) if end_date else "",
+                "contractor_type": contractor_type,
+                "worker": worker or "", "materials": materials or "",
+                "cost": cost if cost > 0 else "", "insurance": insurance or "",
                 "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
-                "notes": record_notes or "",
+                "description": description or "", "notes": record_notes or "",
             })
             st.success("記録を保存しました！"); nav("施設詳細"); st.rerun()
 
