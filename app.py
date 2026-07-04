@@ -38,6 +38,17 @@ STATUSES     = ["稼働中", "待機中", "整備中", "車検中", "廃車"]
 RECORD_TYPES = ["定期点検", "修理", "車検", "燃料補給", "オイル交換", "タイヤ交換", "バッテリー交換", "その他"]
 STATUS_ICONS = {"稼働中": "🟢", "待機中": "🔵", "整備中": "🟡", "車検中": "🟠", "廃車": "⚫", "未設定": "⚪"}
 
+# --- 農機（農業機械）用の定数 ---
+# 重機と同じ machines / machine_status テーブルを共有し、machine_type 列（"重機"/"農機"）で区別する。
+# カテゴリだけ農機用に差し替え、稼働状態・整備記録・稼働日報などの仕組みは重機と共通で使う。
+AGRI_CATEGORIES = ["トラクター", "田植え機", "コンバイン", "乾燥機", "籾摺り・調製機",
+                   "管理機・耕運機", "モア・草刈機", "ロールベーラー", "ラッピングマシン",
+                   "マニュアスプレッダ", "防除機", "運搬車・軽トラ", "作業機・アタッチメント", "その他"]
+FUEL_TYPES     = ["", "軽油", "ガソリン", "混合", "その他"]        # 燃料種別（免税軽油の把握とセット）
+TAX_FREE_OPTS  = ["", "対象", "対象外"]                            # 農業用免税軽油の対象か
+AGRI_WORK_TYPES = ["田起こし", "代掻き", "田植え", "防除", "収穫", "乾燥・調製",
+                   "草刈り", "堆肥散布", "運搬", "その他"]         # 対応作業（本体タグ・稼働日報で使う）
+
 # --- 施設（建物・設備）用の定数 ---
 FACILITY_CATEGORIES   = ["牛舎", "堆肥舎", "飼料倉庫", "事務所", "機械庫", "その他"]
 FACILITY_STATUSES     = ["使用中", "一部使用", "休止中", "解体予定"]
@@ -134,23 +145,35 @@ def scroll_restore(prefix):
 # =====================================================
 # ヘッダーナビ（スマホ向けに2ボタンへ削減）
 # =====================================================
-st.title("🚜 重機・施設管理")
+st.title("🚜 重機・農機・施設管理")
 
-# 重機 / 施設 の切替（選択中を強調）
+# 重機 / 農機 / 施設 の切替（選択中を強調）
 mode = st.session_state.get("mode", "machine")
-mc1, mc2 = st.columns(2)
+mc1, mc2, mc3 = st.columns(3)
 with mc1:
     if st.button("🚜 重機", use_container_width=True,
                  type=("primary" if mode == "machine" else "secondary")):
         st.session_state.mode = "machine"; nav("一覧"); st.rerun()
 with mc2:
+    if st.button("🌾 農機", use_container_width=True,
+                 type=("primary" if mode == "agri" else "secondary")):
+        st.session_state.mode = "agri"; nav("一覧"); st.rerun()
+with mc3:
     if st.button("🏢 施設", use_container_width=True,
                  type=("primary" if mode == "facility" else "secondary")):
         st.session_state.mode = "facility"; nav("施設一覧"); st.rerun()
 
-# モード内のナビ
+# 重機と農機は同じ machines テーブルを machine_type で共有する。
+# モードから「区別に必要な値」をここで一括導出し、以降の重機系ページで使い回す。
+is_agri   = (mode == "agri")
+MTYPE     = "農機" if is_agri else "重機"           # machine_type 列の値（一覧のフィルタ・新規登録で使う）
+CATS      = AGRI_CATEGORIES if is_agri else CATEGORIES
+UNIT      = "農機" if is_agri else "重機"
+HEAD_ICON = "🌾" if is_agri else "🚜"
+
+# モード内のナビ（重機・農機は同じ「一覧／新規登録」）
 n1, n2 = st.columns(2)
-if mode == "machine":
+if mode in ("machine", "agri"):
     with n1:
         if st.button("📋 一覧", use_container_width=True):
             nav("一覧"); st.rerun()
@@ -172,15 +195,16 @@ page = st.session_state.page
 # 一覧
 # =====================================================
 if page == "一覧":
-    st.subheader("重機一覧")
+    st.subheader(f"{UNIT}一覧")
     # カテゴリはタップですぐ切り替わるボタン（ピル）型。再タップ/「すべて」で解除
-    filter_cat = st.pills("カテゴリ", ["すべて"] + CATEGORIES,
-                          selection_mode="single", default="すべて", key="fc") or "すべて"
+    # key はモード別にして、重機↔農機を切り替えても選択状態が混ざらないようにする
+    filter_cat = st.pills("カテゴリ", ["すべて"] + CATS,
+                          selection_mode="single", default="すべて", key=f"fc_{mode}") or "すべて"
     c1, c2 = st.columns([3, 2])
     with c1:
-        filter_status = st.selectbox("状態", ["すべて"] + STATUSES, key="fs")
+        filter_status = st.selectbox("状態", ["すべて"] + STATUSES, key=f"fs_{mode}")
     with c2:
-        show_disposed = st.checkbox("廃車済みも表示", value=False)
+        show_disposed = st.checkbox("廃車済みも表示", value=False, key=f"fsd_{mode}")
 
     machines = db.read("machines")
     statuses = {sval(s.get("machine_id")): s for s in db.read("machine_status")}
@@ -189,6 +213,9 @@ if page == "一覧":
     rows = []
     for m in machines:
         mid = sval(m.get("id"))
+        # machine_type が今のモード（重機/農機）のものだけ。空欄は重機扱い（既存データの保険）。
+        if (sval(m.get("machine_type")) or "重機") != MTYPE:
+            continue
         s = statuses.get(mid, {})
         is_disposed = to_int(m.get("is_disposed")) == 1
         status = sval(s.get("status")) or "未設定"
@@ -209,7 +236,7 @@ if page == "一覧":
     rows.sort(key=lambda r: (r["category"], r["name"]))
 
     if not rows:
-        st.info("該当する重機がありません。「➕ 新規登録」から追加してください。")
+        st.info(f"該当する{UNIT}がありません。「➕ 新規登録」から追加してください。")
     else:
         # 期限アラート
         alerts = []
@@ -263,9 +290,11 @@ elif page == "詳細" and st.session_state.selected_machine_id:
     if st.button("← 一覧に戻る"):
         st.session_state.scroll_back = mid  # 一覧で この重機の位置までスクロールさせる
         nav("一覧"); st.rerun()
+    # この機械が農機かどうかは machine_type で判定（詳細は id で開くのでモードに依存しない）
+    m_is_agri = sval(machine.get("machine_type")) == "農機"
     cur_status = sval(status.get("status")) if status else "未設定"
     icon = STATUS_ICONS.get(cur_status, "⚪")
-    st.subheader(f"🚜 {sval(machine.get('name'))}")
+    st.subheader(f"{'🌾' if m_is_agri else '🚜'} {sval(machine.get('name'))}")
     st.markdown(f"{icon} **{cur_status}**　|　{sval(machine.get('category'))}")
     if to_int(machine.get("is_disposed")) == 1:
         st.warning("この重機は廃車・売却済みです")
@@ -279,6 +308,12 @@ elif page == "詳細" and st.session_state.selected_machine_id:
                            ("シリアル番号", "serial_number"), ("購入日", "purchase_date")]:
             st.markdown(f"**{label}**：{sval(machine.get(key)) or '未登録'}")
         st.markdown(f"**購入価格**：{fmt_price(machine.get('purchase_price'))}")
+        # 農機だけの項目（作業機・対応作業・燃料・免税軽油）
+        if m_is_agri:
+            for label, key in [("作業機・アタッチメント", "attachments"),
+                               ("対応作業", "work_types"), ("燃料", "fuel_type")]:
+                st.markdown(f"**{label}**：{sval(machine.get(key)) or '未登録'}")
+            st.markdown(f"**免税軽油**：{sval(machine.get('tax_free_diesel')) or '未登録'}")
         if sval(machine.get("notes")):
             st.markdown(f"**メモ**：{sval(machine.get('notes'))}")
         st.markdown("---")
@@ -294,6 +329,9 @@ elif page == "詳細" and st.session_state.selected_machine_id:
             st.markdown(f"**{label}**：{v or '未設定'}{extra}")
         st.markdown(f"**稼働状態**：{icon} {cur_status}")
         st.markdown(f"**配備場所**：{(sval(status.get('location')) if status else '') or '未設定'}")
+        if m_is_agri:
+            hm = sval(status.get("hour_meter_current")) if status else ""
+            st.markdown(f"**アワーメーター（現在）**：{(hm + ' h') if hm else '未登録'}")
         show_date("次回点検予定", "next_inspection_date")
         show_date("次回車検", "next_shaken_date")
         st.markdown("---")
@@ -396,21 +434,36 @@ elif page == "詳細" and st.session_state.selected_machine_id:
 # 新規登録
 # =====================================================
 elif page == "登録":
-    st.subheader("➕ 重機を新規登録")
+    st.subheader(f"➕ {UNIT}を新規登録")
     if st.button("← 一覧に戻る"):
         nav("一覧"); st.rerun()
 
     with st.form("register_form", clear_on_submit=True):
         st.markdown("#### 基本情報")
-        name = st.text_input("重機名 ＊必須", placeholder="例：4tダンプ1号")
-        category = st.selectbox("カテゴリ ＊必須", CATEGORIES)
-        manufacturer = st.text_input("メーカー", placeholder="例：コマツ")
-        model = st.text_input("型式・モデル", placeholder="例：PC30UU-5")
+        name = st.text_input(f"{UNIT}名 ＊必須",
+                             placeholder=("例：トラクター1号" if is_agri else "例：4tダンプ1号"))
+        category = st.selectbox("カテゴリ ＊必須", CATS)
+        manufacturer = st.text_input("メーカー", placeholder=("例：クボタ" if is_agri else "例：コマツ"))
+        model = st.text_input("型式・モデル", placeholder=("例：SL60" if is_agri else "例：PC30UU-5"))
         plate_number = st.text_input("ナンバー", placeholder="例：山形800 あ 1234")
         serial_number = st.text_input("シリアル番号")
         purchase_date = st.date_input("購入日", value=None)
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000, value=0)
         notes = st.text_area("メモ")
+
+        # 農機のときだけ出す項目（作業機・対応作業・燃料・免税軽油・アワーメーター）
+        attachments = fuel_type = tax_free = ""
+        work_types_sel = []
+        hour_meter_current = 0
+        if is_agri:
+            st.markdown("#### 農機の項目")
+            attachments = st.text_input("作業機・アタッチメント",
+                                        placeholder="例：ロータリー、ブームスプレーヤ")
+            work_types_sel = st.multiselect("対応作業", AGRI_WORK_TYPES)
+            fuel_type = st.selectbox("燃料", FUEL_TYPES)
+            tax_free = st.selectbox("免税軽油", TAX_FREE_OPTS)
+            hour_meter_current = st.number_input("アワーメーター現在値（h）",
+                                                 min_value=0, step=1, value=0)
 
         st.markdown("#### 初期状態")
         initial_status = st.selectbox("稼働状態", STATUSES)
@@ -425,7 +478,7 @@ elif page == "登録":
 
         if st.form_submit_button("✅ 登録する", use_container_width=True, type="primary"):
             if not name.strip():
-                st.error("重機名を入力してください")
+                st.error(f"{UNIT}名を入力してください")
             else:
                 new_id = db.insert("machines", {
                     "name": name.strip(), "category": category,
@@ -434,6 +487,11 @@ elif page == "登録":
                     "plate_number": plate_number or "", "serial_number": serial_number or "",
                     "purchase_price": purchase_price if purchase_price > 0 else "",
                     "notes": notes or "", "is_disposed": 0,
+                    "machine_type": MTYPE,                                 # 区分（重機/農機）
+                    "attachments": attachments or "",
+                    "work_types": "、".join(work_types_sel) if work_types_sel else "",
+                    "fuel_type": fuel_type or "",
+                    "tax_free_diesel": tax_free or "",
                 })
                 db.insert("machine_status", {
                     "machine_id": new_id, "status": initial_status,
@@ -443,6 +501,7 @@ elif page == "登録":
                     "jibaiseki_expire": str(jibaiseki_exp) if jibaiseki_exp else "",
                     "insurance_expire": str(insurance_exp) if insurance_exp else "",
                     "insurance_company": insurance_co or "",
+                    "hour_meter_current": hour_meter_current if hour_meter_current > 0 else "",
                 })
                 st.success(f"「{name}」を登録しました！")
                 nav("詳細", new_id); st.rerun()
@@ -457,6 +516,7 @@ elif page == "状態更新" and st.session_state.selected_machine_id:
 
     if st.button("← 詳細に戻る"):
         nav("詳細"); st.rerun()
+    s_is_agri = sval(machine.get("machine_type")) == "農機"
     st.subheader(f"📍 状態・保険更新：{sval(machine.get('name'))}")
 
     with st.form("status_form"):
@@ -465,6 +525,10 @@ elif page == "状態更新" and st.session_state.selected_machine_id:
         idx = STATUSES.index(cur) if cur in STATUSES else 0
         new_status = st.selectbox("稼働状態", STATUSES, index=idx)
         new_location = st.text_input("配備場所", value=sval(status.get("location")) if status else "")
+        hm_cur = 0
+        if s_is_agri:
+            hm_cur = st.number_input("アワーメーター現在値（h）", min_value=0, step=1,
+                                     value=(to_int(status.get("hour_meter_current")) or 0) if status else 0)
         next_insp = st.date_input("次回点検予定日",
                                   value=parse_date(status.get("next_inspection_date")) if status else None)
         next_shaken = st.date_input("次回車検予定日",
@@ -488,6 +552,8 @@ elif page == "状態更新" and st.session_state.selected_machine_id:
                 "insurance_expire": str(insurance_exp) if insurance_exp else "",
                 "insurance_company": insurance_co or "", "notes": new_notes or "",
             }
+            if s_is_agri:
+                payload["hour_meter_current"] = hm_cur if hm_cur > 0 else ""
             if status:
                 db.update("machine_status", status.get("id"), payload)
             else:
@@ -569,13 +635,16 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
 
     if st.button("← 詳細に戻る"):
         nav("詳細"); st.rerun()
+    e_is_agri = sval(machine.get("machine_type")) == "農機"
+    e_cats = AGRI_CATEGORIES if e_is_agri else CATEGORIES
+    e_unit = "農機" if e_is_agri else "重機"
     st.subheader(f"✏️ 基本情報を編集：{sval(machine.get('name'))}")
 
     with st.form("edit_form"):
-        name = st.text_input("重機名 ＊必須", value=sval(machine.get("name")))
+        name = st.text_input(f"{e_unit}名 ＊必須", value=sval(machine.get("name")))
         cur_cat = sval(machine.get("category"))
-        cat_idx = CATEGORIES.index(cur_cat) if cur_cat in CATEGORIES else 0
-        category = st.selectbox("カテゴリ", CATEGORIES, index=cat_idx)
+        cat_idx = e_cats.index(cur_cat) if cur_cat in e_cats else 0
+        category = st.selectbox("カテゴリ", e_cats, index=cat_idx)
         manufacturer = st.text_input("メーカー", value=sval(machine.get("manufacturer")))
         model = st.text_input("型式・モデル", value=sval(machine.get("model")))
         plate_number = st.text_input("ナンバー", value=sval(machine.get("plate_number")))
@@ -585,18 +654,42 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
                                          value=to_int(machine.get("purchase_price")) or 0)
         notes = st.text_area("メモ", value=sval(machine.get("notes")))
 
+        # 農機のときだけ、農機項目も編集できるようにする
+        attachments = fuel_type = tax_free = ""
+        work_types_sel = []
+        if e_is_agri:
+            st.markdown("#### 農機の項目")
+            attachments = st.text_input("作業機・アタッチメント",
+                                        value=sval(machine.get("attachments")))
+            cur_works = [w for w in sval(machine.get("work_types")).split("、") if w in AGRI_WORK_TYPES]
+            work_types_sel = st.multiselect("対応作業", AGRI_WORK_TYPES, default=cur_works)
+            cur_fuel = sval(machine.get("fuel_type"))
+            fuel_type = st.selectbox("燃料", FUEL_TYPES,
+                                     index=FUEL_TYPES.index(cur_fuel) if cur_fuel in FUEL_TYPES else 0)
+            cur_tf = sval(machine.get("tax_free_diesel"))
+            tax_free = st.selectbox("免税軽油", TAX_FREE_OPTS,
+                                    index=TAX_FREE_OPTS.index(cur_tf) if cur_tf in TAX_FREE_OPTS else 0)
+
         if st.form_submit_button("✅ 保存する", use_container_width=True, type="primary"):
             if not name.strip():
-                st.error("重機名を入力してください")
+                st.error(f"{e_unit}名を入力してください")
             else:
-                db.update("machines", mid, {
+                payload = {
                     "name": name.strip(), "category": category,
                     "manufacturer": manufacturer or "", "model": model or "",
                     "purchase_date": str(purchase_date) if purchase_date else "",
                     "plate_number": plate_number or "", "serial_number": serial_number or "",
                     "purchase_price": purchase_price if purchase_price > 0 else "",
                     "notes": notes or "",
-                })
+                }
+                if e_is_agri:
+                    payload.update({
+                        "attachments": attachments or "",
+                        "work_types": "、".join(work_types_sel) if work_types_sel else "",
+                        "fuel_type": fuel_type or "",
+                        "tax_free_diesel": tax_free or "",
+                    })
+                db.update("machines", mid, payload)
                 st.success("更新しました！"); nav("詳細"); st.rerun()
 
 # =====================================================
