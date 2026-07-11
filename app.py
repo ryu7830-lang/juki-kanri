@@ -110,7 +110,8 @@ def parse_date(s):
 # 画面遷移
 # =====================================================
 for k, v in [("page", "一覧"), ("selected_machine_id", None),
-             ("mode", "machine"), ("selected_facility_id", None)]:
+             ("mode", "machine"), ("selected_facility_id", None),
+             ("edit_record_id", None)]:  # 明細（整備記録・稼働日報・施設記録）の編集対象id
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -140,6 +141,30 @@ def scroll_restore(prefix):
             </script>""",
             height=0,
         )
+
+
+def render_delete_section(table, rid, back_page, label="この記録"):
+    """明細（整備記録・稼働日報・施設記録）の削除UI。必ず st.form の外で呼ぶこと。
+    現場スマホでの誤タップを防ぐため、削除→確認の2段階にしている。"""
+    st.divider()
+    armed = f"arm_del_{table}_{rid}"  # 記録ごとに確認状態を持ち、実行後に破棄する
+    if not st.session_state.get(armed):
+        if st.button(f"🗑️ {label}を削除する", key=f"del_{table}_{rid}",
+                     use_container_width=True):
+            st.session_state[armed] = True
+            st.rerun()
+    else:
+        st.warning("本当に削除しますか？ 削除すると元に戻せません。")
+        c1, c2 = st.columns(2)
+        if c1.button("✅ はい、削除する", key=f"delyes_{table}_{rid}",
+                     use_container_width=True, type="primary"):
+            db.delete(table, rid)
+            st.session_state.pop(armed, None)
+            st.success("削除しました"); nav(back_page); st.rerun()
+        if c2.button("キャンセル", key=f"delno_{table}_{rid}",
+                     use_container_width=True):
+            st.session_state.pop(armed, None)
+            st.rerun()
 
 
 # =====================================================
@@ -373,6 +398,10 @@ elif page == "詳細" and st.session_state.selected_machine_id:
                         caps.append(f"次回予定：{sval(r.get('next_scheduled_date'))}")
                     for cap in caps:
                         st.caption(cap)
+                    # 入力ミスの訂正用：この記録の編集・削除画面へ
+                    if st.button("✏️ 編集・削除", key=f"edit_rec_{sval(r.get('id'))}"):
+                        st.session_state.edit_record_id = r.get("id")
+                        nav("記録編集"); st.rerun()
         else:
             st.info("記録がまだありません")
 
@@ -393,6 +422,10 @@ elif page == "詳細" and st.session_state.selected_machine_id:
                         st.write(sval(o.get("work_content")))
                     if sval(o.get("location")):
                         st.caption(f"作業場所：{sval(o.get('location'))}")
+                    # 入力ミスの訂正用：この日報の編集・削除画面へ
+                    if st.button("✏️ 編集・削除", key=f"edit_op_{sval(o.get('id'))}"):
+                        st.session_state.edit_record_id = o.get("id")
+                        nav("稼働日報編集"); st.rerun()
         else:
             st.info("稼働記録がまだありません")
 
@@ -595,6 +628,53 @@ elif page == "記録追加" and st.session_state.selected_machine_id:
             st.success("記録を保存しました！"); nav("詳細"); st.rerun()
 
 # =====================================================
+# 整備記録：編集・削除
+# =====================================================
+elif page == "記録編集" and st.session_state.edit_record_id:
+    mid = st.session_state.selected_machine_id
+    rid = st.session_state.edit_record_id
+    machine = db.get("machines", mid)
+    rec = db.get("records", rid)
+    if not rec:  # 削除済み等で見つからなければ詳細へ戻す
+        nav("詳細"); st.rerun()
+
+    if st.button("← 詳細に戻る"):
+        nav("詳細"); st.rerun()
+    st.subheader(f"✏️ 整備記録の編集：{sval(machine.get('name'))}")
+
+    cur_rt = sval(rec.get("record_type"))
+    rt_idx = RECORD_TYPES.index(cur_rt) if cur_rt in RECORD_TYPES else 0
+    with st.form("record_edit"):  # 追加フォームと同じ項目を既存値で初期化
+        record_type = st.selectbox("記録の種類", RECORD_TYPES, index=rt_idx)
+        record_date = st.date_input("実施日",
+                                    value=parse_date(rec.get("record_date")) or date.today())
+        cost = st.number_input("費用（円）", min_value=0, step=1000,
+                               value=to_int(rec.get("cost")) or 0)
+        worker = st.text_input("担当者・整備業者", value=sval(rec.get("worker")))
+        hour_meter = st.number_input("アワーメーター（h）", min_value=0, step=1,
+                                     value=to_int(rec.get("hour_meter")) or 0,
+                                     help="記録時点のエンジン稼働時間の累計")
+        fuel_amount = st.number_input("給油量（L）", min_value=0.0, step=10.0,
+                                      value=to_float(rec.get("fuel_amount")) or 0.0)
+        next_scheduled = st.date_input("次回予定日",
+                                       value=parse_date(rec.get("next_scheduled_date")))
+        description = st.text_area("内容・詳細", value=sval(rec.get("description")))
+        record_notes = st.text_area("その他メモ", value=sval(rec.get("notes")))
+
+        if st.form_submit_button("✅ 更新する", use_container_width=True, type="primary"):
+            db.update("records", rid, {
+                "record_type": record_type, "record_date": str(record_date),
+                "description": description or "", "cost": cost if cost > 0 else "",
+                "worker": worker or "", "hour_meter": hour_meter if hour_meter > 0 else "",
+                "fuel_amount": fuel_amount if fuel_amount > 0 else "",
+                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                "notes": record_notes or "",
+            })
+            st.success("更新しました！"); nav("詳細"); st.rerun()
+
+    render_delete_section("records", rid, "詳細", label="この整備記録")
+
+# =====================================================
 # 稼働日報追加
 # =====================================================
 elif page == "操作記録追加" and st.session_state.selected_machine_id:
@@ -625,6 +705,46 @@ elif page == "操作記録追加" and st.session_state.selected_machine_id:
                     "notes": op_notes or "",
                 })
                 st.success("稼働日報を保存しました！"); nav("詳細"); st.rerun()
+
+# =====================================================
+# 稼働日報：編集・削除
+# =====================================================
+elif page == "稼働日報編集" and st.session_state.edit_record_id:
+    mid = st.session_state.selected_machine_id
+    rid = st.session_state.edit_record_id
+    machine = db.get("machines", mid)
+    op = db.get("operation_logs", rid)
+    if not op:  # 削除済み等で見つからなければ詳細へ戻す
+        nav("詳細"); st.rerun()
+
+    if st.button("← 詳細に戻る"):
+        nav("詳細"); st.rerun()
+    st.subheader(f"✏️ 稼働日報の編集：{sval(machine.get('name'))}")
+
+    with st.form("op_edit"):  # 追加フォームと同じ項目を既存値で初期化
+        operator = st.text_input("オペレーター名 ＊必須", value=sval(op.get("operator")))
+        operation_date = st.date_input("作業日",
+                                       value=parse_date(op.get("operation_date")) or date.today())
+        duration_hours = st.number_input("稼働時間（h）", min_value=0.0, step=0.5,
+                                         value=to_float(op.get("duration_hours")) or 0.0)
+        location = st.text_input("作業場所", value=sval(op.get("location")))
+        work_content = st.text_area("作業内容", value=sval(op.get("work_content")))
+        op_notes = st.text_area("その他メモ", value=sval(op.get("notes")))
+
+        if st.form_submit_button("✅ 更新する", use_container_width=True, type="primary"):
+            if not operator.strip():
+                st.error("オペレーター名を入力してください")
+            else:
+                db.update("operation_logs", rid, {
+                    "operator": operator.strip(),
+                    "operation_date": str(operation_date),
+                    "duration_hours": duration_hours if duration_hours > 0 else "",
+                    "location": location or "", "work_content": work_content or "",
+                    "notes": op_notes or "",
+                })
+                st.success("更新しました！"); nav("詳細"); st.rerun()
+
+    render_delete_section("operation_logs", rid, "詳細", label="この稼働日報")
 
 # =====================================================
 # 基本情報編集
@@ -857,6 +977,10 @@ elif page == "施設詳細" and st.session_state.selected_facility_id:
                         caps.append(f"次回予定：{sval(r.get('next_scheduled_date'))}")
                     for cap in caps:
                         st.caption(cap)
+                    # 入力ミスの訂正用：この記録の編集・削除画面へ
+                    if st.button("✏️ 編集・削除", key=f"edit_frec_{sval(r.get('id'))}"):
+                        st.session_state.edit_record_id = r.get("id")
+                        nav("施設記録編集"); st.rerun()
         else:
             st.info("記録がまだありません")
 
@@ -1000,6 +1124,62 @@ elif page == "施設記録追加" and st.session_state.selected_facility_id:
                 "description": description or "", "notes": record_notes or "",
             })
             st.success("記録を保存しました！"); nav("施設詳細"); st.rerun()
+
+# =====================================================
+# 🏢 施設：点検・修繕記録の編集・削除
+# =====================================================
+elif page == "施設記録編集" and st.session_state.edit_record_id:
+    fid = st.session_state.selected_facility_id
+    rid = st.session_state.edit_record_id
+    facility = db.get("facilities", fid)
+    rec = db.get("facility_records", rid)
+    if not rec:  # 削除済み等で見つからなければ詳細へ戻す
+        nav("施設詳細"); st.rerun()
+
+    if st.button("← 詳細に戻る"):
+        nav("施設詳細"); st.rerun()
+    st.subheader(f"✏️ 点検・修繕記録の編集：{sval(facility.get('name'))}")
+
+    cur_rt = sval(rec.get("record_type"))
+    rt_idx = FACILITY_RECORD_TYPES.index(cur_rt) if cur_rt in FACILITY_RECORD_TYPES else 0
+    cur_ct = sval(rec.get("contractor_type"))
+    ct_idx = ["自社", "外注"].index(cur_ct) if cur_ct in ["自社", "外注"] else 0
+    with st.form("f_record_edit"):  # 追加フォームと同じ項目を既存値で初期化
+        record_type = st.selectbox("記録の種類", FACILITY_RECORD_TYPES, index=rt_idx)
+        repair_location = st.text_input("修繕箇所", value=sval(rec.get("repair_location")))
+        c1, c2 = st.columns(2)
+        with c1:
+            record_date = st.date_input("開始日（実施日）",
+                                        value=parse_date(rec.get("record_date")) or date.today())
+        with c2:
+            end_date = st.date_input("終了日（工事期間がある場合）",
+                                     value=parse_date(rec.get("end_date")))
+        contractor_type = st.radio("区分", ["自社", "外注"], horizontal=True, index=ct_idx)
+        worker = st.text_input("担当者・業者", value=sval(rec.get("worker")))
+        materials = st.text_area("部材", value=sval(rec.get("materials")))
+        cost = st.number_input("費用（円）", min_value=0, step=1000,
+                               value=to_int(rec.get("cost")) or 0)
+        insurance = st.text_input("保険", value=sval(rec.get("insurance")))
+        next_scheduled = st.date_input("次回予定日",
+                                       value=parse_date(rec.get("next_scheduled_date")))
+        description = st.text_area("内容・詳細", value=sval(rec.get("description")))
+        record_notes = st.text_area("その他メモ", value=sval(rec.get("notes")))
+
+        if st.form_submit_button("✅ 更新する", use_container_width=True, type="primary"):
+            db.update("facility_records", rid, {
+                "record_type": record_type,
+                "repair_location": repair_location or "",
+                "record_date": str(record_date),
+                "end_date": str(end_date) if end_date else "",
+                "contractor_type": contractor_type,
+                "worker": worker or "", "materials": materials or "",
+                "cost": cost if cost > 0 else "", "insurance": insurance or "",
+                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                "description": description or "", "notes": record_notes or "",
+            })
+            st.success("更新しました！"); nav("施設詳細"); st.rerun()
+
+    render_delete_section("facility_records", rid, "施設詳細", label="この記録")
 
 # =====================================================
 # 🏢 施設：基本情報編集
