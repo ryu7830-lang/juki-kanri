@@ -37,6 +37,8 @@ CATEGORIES   = ["家畜車", "ダンプ", "トラック", "タイヤショベル
 STATUSES     = ["稼働中", "待機中", "整備中", "車検中", "廃車"]
 RECORD_TYPES = ["定期点検", "修理", "車検", "燃料補給", "オイル交換", "タイヤ交換", "バッテリー交換", "その他"]
 STATUS_ICONS = {"稼働中": "🟢", "待機中": "🔵", "整備中": "🟡", "車検中": "🟠", "廃車": "⚫", "未設定": "⚪"}
+# 一覧の並び替えメニュー（機械/農機用・先頭が既定）
+SORT_OPTS_MACHINE  = ["カテゴリ順", "名前順", "状態順", "配備場所順", "車検・保険が近い順", "登録が新しい順"]
 
 # --- 農機（農業機械）用の定数 ---
 # 重機と同じ machines / machine_status テーブルを共有し、machine_type 列（"重機"/"農機"）で区別する。
@@ -54,6 +56,8 @@ FACILITY_CATEGORIES   = ["牛舎", "堆肥舎", "飼料倉庫", "事務所", "�
 FACILITY_STATUSES     = ["使用中", "一部使用", "休止中", "解体予定"]
 FACILITY_RECORD_TYPES = ["法定点検", "定期点検", "修繕", "設備更新", "その他"]
 FACILITY_STATUS_ICONS = {"使用中": "🟢", "一部使用": "🟡", "休止中": "⚪", "解体予定": "⚫", "未設定": "⚪"}
+# 一覧の並び替えメニュー（施設用・先頭が既定）
+SORT_OPTS_FACILITY = ["種類順", "名前順", "状態順", "場所順", "点検期限が近い順", "登録が新しい順"]
 # 法定点検の枠（ラベル, facility_statusの期限カラム名）
 LEGAL_CHECKS = [("消防設備", "fire_expire"), ("電気設備", "electrical_expire"), ("浄化槽", "septic_expire")]
 
@@ -104,6 +108,40 @@ def parse_date(s):
         return date.fromisoformat(s) if s else None
     except Exception:
         return None
+
+
+# --- 並び替え用のヘルパー ---
+_FAR = 10 ** 9  # 期限なしを最後尾に送るための大きな残日数
+
+
+def nearest_days(*dates):
+    """複数の期限のうち一番近い残日数を返す。期限が一つも無ければ末尾扱い。"""
+    ds = [days_until(d) for d in dates]
+    ds = [x for x in ds if x is not None]
+    return min(ds) if ds else _FAR
+
+
+def status_rank(status, order):
+    """状態を決められた並び順の番号に変換。一覧に無い値（未設定など）は末尾。"""
+    return order.index(status) if status in order else len(order)
+
+
+def sort_rows(rows, sort_by, status_order):
+    """一覧の行を選択された基準で並び替える（機械・施設で共通）。
+    期限順は各行に事前計算した r['_expire_days']（一番近い残日数）を使う。
+    status_order=状態の並び順。"""
+    if sort_by == "名前順":
+        rows.sort(key=lambda r: r["name"])
+    elif sort_by == "状態順":
+        rows.sort(key=lambda r: (status_rank(r["status"], status_order), r["name"]))
+    elif sort_by in ("配備場所順", "場所順"):
+        rows.sort(key=lambda r: (r["location"], r["name"]))
+    elif sort_by in ("車検・保険が近い順", "点検期限が近い順"):
+        rows.sort(key=lambda r: r.get("_expire_days", _FAR))
+    elif sort_by == "登録が新しい順":
+        rows.sort(key=lambda r: -(to_int(r["id"]) or 0))
+    else:  # カテゴリ順 / 種類順（既定）
+        rows.sort(key=lambda r: (r["category"], r["name"]))
 
 
 # =====================================================
@@ -230,6 +268,8 @@ if page == "一覧":
         filter_status = st.selectbox("状態", ["すべて"] + STATUSES, key=f"fs_{mode}")
     with c2:
         show_disposed = st.checkbox("廃車済みも表示", value=False, key=f"fsd_{mode}")
+    # 並び替え。key をモード別にして重機↔農機で選択を独立記憶させる
+    sort_by = st.selectbox("並び替え", SORT_OPTS_MACHINE, key=f"sort_{mode}")
 
     machines = db.read("machines")
     statuses = {sval(s.get("machine_id")): s for s in db.read("machine_status")}
@@ -257,8 +297,12 @@ if page == "一覧":
             "next_shaken_date": s.get("next_shaken_date"),
             "jibaiseki_expire": s.get("jibaiseki_expire"),
             "insurance_expire": s.get("insurance_expire"),
+            # 車検・自賠責・任意保険のうち一番近い残日数（「期限が近い順」で使う）
+            "_expire_days": nearest_days(s.get("next_shaken_date"),
+                                         s.get("jibaiseki_expire"),
+                                         s.get("insurance_expire")),
         })
-    rows.sort(key=lambda r: (r["category"], r["name"]))
+    sort_rows(rows, sort_by, STATUSES)
 
     if not rows:
         st.info(f"該当する{UNIT}がありません。「➕ 新規登録」から追加してください。")
@@ -825,6 +869,7 @@ elif page == "施設一覧":
         f_status = st.selectbox("状態", ["すべて"] + FACILITY_STATUSES, key="ffs")
     with c2:
         show_removed = st.checkbox("解体・廃止も表示", value=False, key="fshow")
+    sort_by = st.selectbox("並び替え", SORT_OPTS_FACILITY, key="sort_facility")
 
     facilities = db.read("facilities")
     fstatuses = {sval(s.get("facility_id")): s for s in db.read("facility_status")}
@@ -847,8 +892,10 @@ elif page == "施設一覧":
             "id": fid, "name": sval(f.get("name")), "category": sval(f.get("category")),
             "removed": removed, "status": status,
             "location": sval(s.get("location")) or "未設定", "checks": checks,
+            # 法定点検（消防・電気・浄化槽・その他）のうち一番近い残日数
+            "_expire_days": nearest_days(*[d for _, d in checks]),
         })
-    rows.sort(key=lambda r: (r["category"], r["name"]))
+    sort_rows(rows, sort_by, FACILITY_STATUSES)
 
     if not rows:
         st.info("該当する施設がありません。「➕ 施設を登録」から追加してください。")
