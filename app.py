@@ -10,7 +10,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 import json
 from datetime import date, timedelta
+import pandas as pd
+import altair as alt
 import sheets_backend as db
+import brand_colors as bc  # グラフの系列色（正本は farm/brand/brand.json）
 
 # スマホで見やすいよう中央寄せ（横長wideにしない）
 st.set_page_config(page_title="重機管理", page_icon="🚜", layout="centered",
@@ -237,9 +240,10 @@ CATS      = AGRI_CATEGORIES if is_agri else CATEGORIES
 UNIT      = "農機" if is_agri else "重機"
 HEAD_ICON = "🌾" if is_agri else "🚜"
 
-# モード内のナビ（重機・農機は「一覧／登録／日別」の3つ。日別は重機・農機を横断して見る）
+# モード内のナビ（重機・農機は「一覧／登録／日別／ダッシュ」の4つ。
+# 日別とダッシュボードは重機・農機・施設を横断して見るページ）
 if mode in ("machine", "agri"):
-    n1, n2, n3 = st.columns(3)
+    n1, n2, n3, n4 = st.columns(4)
     with n1:
         if st.button("📋 一覧", use_container_width=True):
             nav("一覧"); st.rerun()
@@ -249,14 +253,20 @@ if mode in ("machine", "agri"):
     with n3:
         if st.button("📅 日別", use_container_width=True):
             nav("日別"); st.rerun()
+    with n4:
+        if st.button("📊 ダッシュ", use_container_width=True):
+            nav("ダッシュ"); st.rerun()
 else:
-    n1, n2 = st.columns(2)
+    n1, n2, n3 = st.columns(3)
     with n1:
         if st.button("📋 施設一覧", use_container_width=True):
             nav("施設一覧"); st.rerun()
     with n2:
         if st.button("➕ 施設を登録", use_container_width=True):
             nav("施設登録"); st.rerun()
+    with n3:
+        if st.button("📊 ダッシュ", use_container_width=True):
+            nav("ダッシュ"); st.rerun()
 st.divider()
 
 page = st.session_state.page
@@ -489,6 +499,219 @@ elif page == "日別":
                         if st.button("🔧 この機械の詳細", key=f"daily_rec_{sval(r.get('id'))}",
                                      use_container_width=True):
                             nav("詳細", r.get("machine_id")); st.rerun()
+
+# =====================================================
+# 📊 ダッシュボード
+# 台帳の全体像を1画面で見るページ（重機・農機・施設を横断）。
+# 設計の考え方: 数字が出ない枠を隠さず「未入力」と見せる。
+# 空欄のままだと期限アラートが鳴らず、修理費の部門配賦も効かないため、
+# 「何を入れれば効くようになるか」が分かる形にしている。
+# =====================================================
+elif page == "ダッシュ":
+    st.subheader("📊 ダッシュボード")
+
+    machines  = db.read("machines")
+    m_status  = {sval(s.get("machine_id")): s for s in db.read("machine_status")}
+    records   = db.read("records")
+    ops       = db.read("operation_logs")
+    facilities = db.read("facilities")
+    f_status  = {sval(s.get("facility_id")): s for s in db.read("facility_status")}
+    f_records = db.read("facility_records")
+
+    live  = [m for m in machines if to_int(m.get("is_disposed")) != 1]
+    juki  = [m for m in live if (sval(m.get("machine_type")) or "重機") == "重機"]
+    nouki = [m for m in live if sval(m.get("machine_type")) == "農機"]
+
+    # --- 保有台数 ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🚜 重機", f"{len(juki)}台")
+    c2.metric("🌾 農機", f"{len(nouki)}台")
+    c3.metric("🏢 施設", f"{len(facilities)}件")
+    if len(machines) - len(live):
+        st.caption(f"※廃車・売却済み {len(machines) - len(live)}台は台数に含めていません")
+
+    # --- 🚨 期限アラート ---
+    st.markdown("### 🚨 期限アラート（90日以内）")
+    alerts = []
+    for m in live:
+        s = m_status.get(sval(m.get("id")), {})
+        for label, key in [("車検", "next_shaken_date"), ("自賠責", "jibaiseki_expire"),
+                           ("任意保険", "insurance_expire"), ("点検予定", "next_inspection_date")]:
+            d = days_until(s.get(key))
+            if d is not None and d <= 90:
+                alerts.append({"対象": sval(m.get("name")), "種別": label,
+                               "期限日": sval(s.get(key)), "残り日数": d})
+    for f in facilities:
+        s = f_status.get(sval(f.get("id")), {})
+        for label, key in LEGAL_CHECKS:
+            d = days_until(s.get(key))
+            if d is not None and d <= 90:
+                alerts.append({"対象": sval(f.get("name")), "種別": f"{label}点検",
+                               "期限日": sval(s.get(key)), "残り日数": d})
+    if alerts:
+        st.dataframe(pd.DataFrame(alerts).sort_values("残り日数"),
+                     hide_index=True, use_container_width=True)
+    else:
+        # 期限が1件も入っていない状態で「アラートなし」だけ出すと安心してしまうため、
+        # 監視できている台数を必ず添える
+        watched = sum(1 for m in live
+                      if nearest_days(m_status.get(sval(m.get("id")), {}).get("next_shaken_date"),
+                                      m_status.get(sval(m.get("id")), {}).get("jibaiseki_expire"),
+                                      m_status.get(sval(m.get("id")), {}).get("insurance_expire")) < _FAR)
+        if watched == 0:
+            st.warning(f"期限が登録されている機械が0台のため、**アラートは鳴りません**（対象 {len(live)}台）。"
+                       "各機械の「📍 状態・保険情報を更新する」から車検・自賠責・任意保険の期限を入れてください")
+        else:
+            st.success(f"90日以内に期限を迎えるものはありません（期限を監視できているのは {watched}/{len(live)}台）")
+
+    # --- 📋 台帳の入力状況 ---
+    st.markdown("### 📋 台帳の入力状況")
+    st.caption("空欄が多いと、期限アラートが鳴らず、修理費を部門に振り分けるときも「要確認」になります")
+    for label, key in [("配備場所", "location"), ("車検の期限", "next_shaken_date"),
+                       ("自賠責の期限", "jibaiseki_expire"), ("任意保険の期限", "insurance_expire")]:
+        n = sum(1 for m in live if sval(m_status.get(sval(m.get("id")), {}).get(key)))
+        st.progress(n / len(live) if live else 0.0, text=f"{label}：{n} / {len(live)}台")
+    for label, key in LEGAL_CHECKS:
+        n = sum(1 for f in facilities if sval(f_status.get(sval(f.get("id")), {}).get(key)))
+        st.progress(n / len(facilities) if facilities else 0.0,
+                    text=f"施設の{label}点検期限：{n} / {len(facilities)}件")
+
+    # --- 🗂️ 保有の内訳 ---
+    st.markdown("### 🗂️ 保有の内訳")
+    df_m = pd.DataFrame([{
+        "種別": (sval(m.get("machine_type")) or "重機"),
+        "カテゴリ": sval(m.get("category")) or "未設定",
+        "状態": sval(m_status.get(sval(m.get("id")), {}).get("status")) or "未設定",
+        "配備場所": sval(m_status.get(sval(m.get("id")), {}).get("location")) or "未設定",
+    } for m in live])
+    if df_m.empty:
+        st.info("機械が登録されていません")
+    else:
+        cat = df_m.groupby(["カテゴリ", "種別"]).size().reset_index(name="台数")
+        # 色は対象（重機/農機）に固定する。絞り込みで系列が減っても色は動かさない
+        kd, kr = bc.fixed_scale(["重機", "農機"], present=set(cat["種別"]))
+        st.altair_chart(alt.Chart(cat).mark_bar().encode(
+            x=alt.X("台数:Q", title="台数"),
+            y=alt.Y("カテゴリ:N", title="", sort="-x"),
+            color=alt.Color("種別:N", title="種別", scale=alt.Scale(domain=kd, range=kr)),
+            tooltip=["カテゴリ", "種別", "台数"],
+        ).properties(height=max(200, len(cat) * 32)), use_container_width=True)
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.caption("状態別")
+            st.dataframe(df_m["状態"].value_counts().rename_axis("状態").reset_index(name="台数"),
+                         hide_index=True, use_container_width=True)
+        with cc2:
+            st.caption("配備場所別")
+            st.dataframe(df_m["配備場所"].value_counts().rename_axis("配備場所").reset_index(name="台数"),
+                         hide_index=True, use_container_width=True)
+
+    # --- 🔧 整備記録の動き ---
+    st.markdown("### 🔧 整備記録の動き")
+    names = {sval(m.get("id")): sval(m.get("name")) for m in machines}
+    df_r = pd.DataFrame([{
+        "機械": names.get(sval(r.get("machine_id")), "（台帳にない機械）"),
+        "月": sval(r.get("record_date"))[:7],
+        "種別": sval(r.get("record_type")) or "未設定",
+        "費用": to_int(r.get("cost")) or 0,
+        "給油量": to_float(r.get("fuel_amount")) or 0.0,
+    } for r in records if sval(r.get("record_date"))])
+    if df_r.empty:
+        st.info("整備記録がまだありません")
+    else:
+        total_cost = int(df_r["費用"].sum())
+        total_fuel = float(df_r["給油量"].sum())
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("記録件数", f"{len(df_r)}件")
+        rc2.metric("費用の合計", f"¥{total_cost:,}" if total_cost else "未入力")
+        rc3.metric("給油量の合計", f"{total_fuel:.0f}L" if total_fuel else "未入力")
+
+        m_cnt = df_r.groupby(["月", "種別"]).size().reset_index(name="件数")
+        # 整備の種別ごとに色を固定（月が変わっても同じ種別は同じ色）。
+        # 凡例は実際に記録がある種別だけに絞る（色の対応は絞っても変わらない）
+        td, tr = bc.fixed_scale(RECORD_TYPES + ["未設定"], present=set(m_cnt["種別"]))
+        st.altair_chart(alt.Chart(m_cnt).mark_bar().encode(
+            x=alt.X("月:O", title="月"),
+            y=alt.Y("件数:Q", title="件数"),
+            color=alt.Color("種別:N", title="種別", scale=alt.Scale(domain=td, range=tr)),
+            tooltip=["月", "種別", "件数"],
+        ).properties(height=260), use_container_width=True)
+
+        if total_cost:
+            top = (df_r.groupby("機械")["費用"].sum().reset_index()
+                   .sort_values("費用", ascending=False).head(10))
+            st.caption("費用の大きい機械 上位10")
+            st.altair_chart(alt.Chart(top).mark_bar(color=bc.series(1)[0]).encode(
+                x=alt.X("費用:Q", title="費用（円）"),
+                y=alt.Y("機械:N", title="", sort="-x"),
+                tooltip=["機械", alt.Tooltip("費用:Q", format=",")],
+            ).properties(height=max(200, len(top) * 32)), use_container_width=True)
+        else:
+            st.info("整備記録に金額が1件も入っていないため、費用のグラフは出せません"
+                    "（記録追加の「費用（円）」欄に入れると、ここに月別・機械別で出ます）")
+
+    # --- ⏱️ 整備記録の空白 ---
+    st.markdown("### ⏱️ しばらく整備記録がない機械")
+    last = {}
+    for r in records:
+        mid, d = sval(r.get("machine_id")), sval(r.get("record_date"))
+        if d and (mid not in last or d > last[mid]):
+            last[mid] = d
+    aged = sorted([(m, last[sval(m.get("id"))]) for m in live if sval(m.get("id")) in last],
+                  key=lambda x: x[1])[:5]
+    never = [m for m in live if sval(m.get("id")) not in last]
+    if aged:
+        st.dataframe(pd.DataFrame([{
+            "機械": sval(m.get("name")), "最終の記録": d,
+            "経過日数": -(days_until(d) or 0),
+        } for m, d in aged]), hide_index=True, use_container_width=True)
+    if never:
+        st.caption(f"※整備記録が1件もない機械が {len(never)}台あります（対象 {len(live)}台）")
+
+    # --- 👤 稼働日報 ---
+    st.markdown("### 👤 稼働日報")
+    df_o = pd.DataFrame([{
+        "月": sval(o.get("operation_date"))[:7],
+        "オペレーター": sval(o.get("operator")) or "未記入",
+        "稼働時間": to_float(o.get("duration_hours")) or 0.0,
+    } for o in ops if sval(o.get("operation_date"))])
+    if df_o.empty:
+        st.info("稼働日報がまだ1件もありません。日報が貯まると、月別の稼働時間と担当者別の実績がここに出ます")
+    else:
+        oc1, oc2 = st.columns(2)
+        oc1.metric("日報の件数", f"{len(df_o)}件")
+        oc2.metric("延べ稼働時間", f"{df_o['稼働時間'].sum():.1f}h")
+        by_month = df_o.groupby("月")["稼働時間"].sum().reset_index()
+        st.altair_chart(alt.Chart(by_month).mark_bar(color=bc.series(1)[0]).encode(
+            x=alt.X("月:O", title="月"),
+            y=alt.Y("稼働時間:Q", title="稼働時間（h）"),
+            tooltip=["月", alt.Tooltip("稼働時間:Q", format=".1f")],
+        ).properties(height=240), use_container_width=True)
+        st.caption("オペレーター別")
+        st.dataframe(df_o.groupby("オペレーター")
+                     .agg(件数=("稼働時間", "size"), 稼働時間=("稼働時間", "sum"))
+                     .reset_index().sort_values("稼働時間", ascending=False),
+                     hide_index=True, use_container_width=True)
+
+    # --- 🏢 施設 ---
+    st.markdown("### 🏢 施設")
+    if not facilities:
+        st.info("施設がまだ登録されていません")
+    else:
+        df_f = pd.DataFrame([{
+            "種類": sval(f.get("category")) or "未設定",
+            "状態": sval(f_status.get(sval(f.get("id")), {}).get("status")) or "未設定",
+        } for f in facilities])
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            st.caption("種類別")
+            st.dataframe(df_f["種類"].value_counts().rename_axis("種類").reset_index(name="件数"),
+                         hide_index=True, use_container_width=True)
+        with fc2:
+            st.caption("状態別")
+            st.dataframe(df_f["状態"].value_counts().rename_axis("状態").reset_index(name="件数"),
+                         hide_index=True, use_container_width=True)
+        st.caption(f"点検・修繕の記録：{len(f_records)}件")
 
 # =====================================================
 # 詳細
