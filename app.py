@@ -9,7 +9,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import json
-from datetime import date
+from datetime import date, timedelta
 import sheets_backend as db
 
 # スマホで見やすいよう中央寄せ（横長wideにしない）
@@ -60,6 +60,9 @@ FACILITY_STATUS_ICONS = {"使用中": "🟢", "一部使用": "🟡", "休止中
 SORT_OPTS_FACILITY = ["種類順", "名前順", "状態順", "場所順", "点検期限が近い順", "登録が新しい順"]
 # 法定点検の枠（ラベル, facility_statusの期限カラム名）
 LEGAL_CHECKS = [("消防設備", "fire_expire"), ("電気設備", "electrical_expire"), ("浄化槽", "septic_expire")]
+
+# 日別ページの曜日表示（月曜=0）
+WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
 
 
 # =====================================================
@@ -234,16 +237,20 @@ CATS      = AGRI_CATEGORIES if is_agri else CATEGORIES
 UNIT      = "農機" if is_agri else "重機"
 HEAD_ICON = "🌾" if is_agri else "🚜"
 
-# モード内のナビ（重機・農機は同じ「一覧／新規登録」）
-n1, n2 = st.columns(2)
+# モード内のナビ（重機・農機は「一覧／登録／日別」の3つ。日別は重機・農機を横断して見る）
 if mode in ("machine", "agri"):
+    n1, n2, n3 = st.columns(3)
     with n1:
         if st.button("📋 一覧", use_container_width=True):
             nav("一覧"); st.rerun()
     with n2:
-        if st.button("➕ 新規登録", use_container_width=True):
+        if st.button("➕ 登録", use_container_width=True):
             nav("登録"); st.rerun()
+    with n3:
+        if st.button("📅 日別", use_container_width=True):
+            nav("日別"); st.rerun()
 else:
+    n1, n2 = st.columns(2)
     with n1:
         if st.button("📋 施設一覧", use_container_width=True):
             nav("施設一覧"); st.rerun()
@@ -341,6 +348,147 @@ if page == "一覧":
 
         # 詳細から戻ってきたとき、見ていた重機の位置まで自動スクロール
         scroll_restore("machine")
+
+# =====================================================
+# 📅 日別の作業
+# 「その日に何をしたか」を機械をまたいで見返すページ。
+# 機械ごとの詳細（縦）だけでは日単位の全体像が分からないので、日付軸（横）で
+# 稼働日報と整備記録の両方を1画面に集める。重機・農機はまとめて表示し、
+# 必要なら種別で絞り込む。
+# =====================================================
+elif page == "日別":
+    st.subheader("📅 日別の作業")
+
+    # 表示中の日付は session_state に持つ（前日/翌日ボタンで動かすため）。
+    # date_input に key を付けないのは、ボタンで書き換えた値をそのまま反映させるため。
+    if "daily_date" not in st.session_state:
+        st.session_state.daily_date = date.today()
+
+    d1, d2, d3 = st.columns([1, 2, 1])
+    with d1:
+        if st.button("◀ 前日", use_container_width=True):
+            st.session_state.daily_date -= timedelta(days=1); st.rerun()
+    with d3:
+        if st.button("翌日 ▶", use_container_width=True):
+            st.session_state.daily_date += timedelta(days=1); st.rerun()
+    with d2:
+        picked = st.date_input("日付", value=st.session_state.daily_date,
+                               label_visibility="collapsed")
+    if picked and picked != st.session_state.daily_date:
+        st.session_state.daily_date = picked; st.rerun()
+
+    the_day = st.session_state.daily_date
+    d_str = str(the_day)
+    st.caption(f"{the_day.year}年{the_day.month}月{the_day.day}日"
+               f"（{WEEKDAYS[the_day.weekday()]}）"
+               + ("　＝今日" if the_day == date.today() else ""))
+
+    all_ops = db.read("operation_logs")
+    all_recs = db.read("records")
+
+    # 「最後に作業したのいつだっけ」用のショートカット（記録のある日だけ並べる）
+    rec_days = sorted({sval(o.get("operation_date")) for o in all_ops}
+                      | {sval(r.get("record_date")) for r in all_recs}, reverse=True)
+    rec_days = [x for x in rec_days if x][:6]
+    if rec_days:
+        with st.expander("🕘 記録のある日にジャンプ"):
+            for i in range(0, len(rec_days), 3):
+                cols = st.columns(3)
+                for col, ds in zip(cols, rec_days[i:i + 3]):
+                    with col:
+                        if st.button(ds, key=f"jump_{ds}", use_container_width=True):
+                            jumped = parse_date(ds)
+                            if jumped:
+                                st.session_state.daily_date = jumped; st.rerun()
+
+    # 種別の絞り込み（既定はすべて＝重機と農機をまとめて見る）
+    kind = st.pills("種別", ["すべて", "🚜 重機", "🌾 農機"], selection_mode="single",
+                    default="すべて", key="daily_kind") or "すべて"
+
+    machines = {sval(m.get("id")): m for m in db.read("machines")}
+
+    def m_type(mid):
+        """その機械が重機か農機か。空欄は重機扱い（既存データの保険）。"""
+        return sval(machines.get(sval(mid), {}).get("machine_type")) or "重機"
+
+    def m_label(mid):
+        """カード見出し用の機械名（アイコン付き）。台帳から消えた機械にも耐える。"""
+        m = machines.get(sval(mid))
+        if not m:
+            return "（台帳にない機械）"
+        return f"{'🌾' if m_type(mid) == '農機' else '🚜'} {sval(m.get('name'))}"
+
+    def keep(mid):
+        if kind == "🚜 重機":
+            return m_type(mid) == "重機"
+        if kind == "🌾 農機":
+            return m_type(mid) == "農機"
+        return True
+
+    ops = [o for o in all_ops
+           if sval(o.get("operation_date")) == d_str and keep(o.get("machine_id"))]
+    recs = [r for r in all_recs
+            if sval(r.get("record_date")) == d_str and keep(r.get("machine_id"))]
+    ops.sort(key=lambda o: m_label(o.get("machine_id")))
+    recs.sort(key=lambda r: m_label(r.get("machine_id")))
+
+    st.divider()
+    if not ops and not recs:
+        st.info("この日の記録はありません。")
+    else:
+        # その日の合計（誰がどれだけ動かしたか・いくら整備にかかったかを一目で）
+        total_h = sum(to_float(o.get("duration_hours")) or 0 for o in ops)
+        total_cost = sum(to_int(r.get("cost")) or 0 for r in recs)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("日報のあった台数", f"{len({sval(o.get('machine_id')) for o in ops})}台")
+        c2.metric("延べ稼働時間", f"{total_h:.1f}h" if total_h else "—")
+        c3.metric("整備記録", f"{len(recs)}件")
+
+        # --- 稼働日報 ---
+        if ops:
+            st.markdown(f"#### 👤 稼働日報　{len(ops)}件")
+            for o in ops:
+                with st.container(border=True):
+                    dur = to_float(o.get("duration_hours"))
+                    st.markdown(f"**{m_label(o.get('machine_id'))}**"
+                                + (f"　{dur:.1f}h" if dur else ""))
+                    caps = [f"オペレーター：{sval(o.get('operator')) or '未記入'}"]
+                    if sval(o.get("location")):
+                        caps.append(f"場所：{sval(o.get('location'))}")
+                    st.caption("　|　".join(caps))
+                    if sval(o.get("work_content")):
+                        st.write(sval(o.get("work_content")))
+                    if sval(o.get("notes")):
+                        st.caption(f"メモ：{sval(o.get('notes'))}")
+                    if machines.get(sval(o.get("machine_id"))):
+                        if st.button("🔧 この機械の詳細", key=f"daily_op_{sval(o.get('id'))}",
+                                     use_container_width=True):
+                            nav("詳細", o.get("machine_id")); st.rerun()
+
+        # --- 整備記録 ---
+        if recs:
+            st.markdown(f"#### 🔧 整備記録　{len(recs)}件"
+                        + (f"　費用計 {fmt_price(total_cost)}" if total_cost else ""))
+            for r in recs:
+                with st.container(border=True):
+                    st.markdown(f"**{m_label(r.get('machine_id'))}**"
+                                f"　{sval(r.get('record_type'))}"
+                                + (f"　{fmt_price(r.get('cost'))}" if to_int(r.get("cost")) else ""))
+                    if sval(r.get("description")):
+                        st.write(sval(r.get("description")))
+                    caps = []
+                    if sval(r.get("worker")):
+                        caps.append(f"担当：{sval(r.get('worker'))}")
+                    if to_int(r.get("hour_meter")):
+                        caps.append(f"アワーメーター：{to_int(r.get('hour_meter')):,}h")
+                    if to_float(r.get("fuel_amount")):
+                        caps.append(f"給油量：{to_float(r.get('fuel_amount')):.1f}L")
+                    if caps:
+                        st.caption("　|　".join(caps))
+                    if machines.get(sval(r.get("machine_id"))):
+                        if st.button("🔧 この機械の詳細", key=f"daily_rec_{sval(r.get('id'))}",
+                                     use_container_width=True):
+                            nav("詳細", r.get("machine_id")); st.rerun()
 
 # =====================================================
 # 詳細
