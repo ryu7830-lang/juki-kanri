@@ -9,7 +9,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 import altair as alt
 import sheets_backend as db
@@ -93,12 +93,22 @@ def sval(v):
     return s.strip()
 
 
+# Streamlit Cloud のサーバは UTC で動くため、date.today() は日本時間の朝9時まで前日を返す。
+# 現場は朝に記録を付けるので、日付は必ず日本時間で判断する。
+_JST = timezone(timedelta(hours=9))
+
+
+def today_jst():
+    """今日の日付（日本時間）。"""
+    return datetime.now(_JST).date()
+
+
 def days_until(d):
     s = sval(d)
     if not s:
         return None
     try:
-        return (date.fromisoformat(s) - date.today()).days
+        return (date.fromisoformat(s) - today_jst()).days
     except Exception:
         return None
 
@@ -130,7 +140,7 @@ def purchase_date_value(s):
     d = parse_date(s)
     if d is None:
         return None
-    return min(max(d, PURCHASE_MIN_DATE), date.today())
+    return min(max(d, PURCHASE_MIN_DATE), today_jst())
 
 
 # --- 並び替え用のヘルパー ---
@@ -389,7 +399,7 @@ elif page == "日別":
     # 表示中の日付は session_state に持つ（前日/翌日ボタンで動かすため）。
     # date_input に key を付けないのは、ボタンで書き換えた値をそのまま反映させるため。
     if "daily_date" not in st.session_state:
-        st.session_state.daily_date = date.today()
+        st.session_state.daily_date = today_jst()
 
     d1, d2, d3 = st.columns([1, 2, 1])
     with d1:
@@ -408,7 +418,7 @@ elif page == "日別":
     d_str = str(the_day)
     st.caption(f"{the_day.year}年{the_day.month}月{the_day.day}日"
                f"（{WEEKDAYS[the_day.weekday()]}）"
-               + ("　＝今日" if the_day == date.today() else ""))
+               + ("　＝今日" if the_day == today_jst() else ""))
 
     all_ops = db.read("operation_logs")
     all_recs = db.read("records")
@@ -878,7 +888,7 @@ elif page == "詳細" and st.session_state.selected_machine_id:
         else:
             st.warning("廃車・売却を登録すると一覧から非表示になります（記録は残ります）")
             with st.form("disposal_form"):
-                sold_date = st.date_input("処分日", value=date.today())
+                sold_date = st.date_input("処分日", value=today_jst())
                 disposal_reason = st.text_input("理由", placeholder="例：老朽化、使用頻度低下")
                 sold_price = st.number_input("売却価格（円）", min_value=0, step=10000, value=0)
                 if st.form_submit_button("廃車・売却として登録する", type="primary"):
@@ -913,7 +923,7 @@ elif page == "登録":
         plate_number = st.text_input("ナンバー", placeholder="例：山形800 あ 1234")
         serial_number = st.text_input("シリアル番号")
         purchase_date = st.date_input("購入日", value=None,
-                                      min_value=PURCHASE_MIN_DATE, max_value=date.today())
+                                      min_value=PURCHASE_MIN_DATE, max_value=today_jst())
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000, value=0)
         notes = st.text_area("メモ")
 
@@ -1039,7 +1049,7 @@ elif page == "記録追加" and st.session_state.selected_machine_id:
 
     with st.form("record_form", clear_on_submit=True):
         record_type = st.selectbox("記録の種類", RECORD_TYPES)
-        record_date = st.date_input("実施日", value=date.today())
+        record_date = st.date_input("実施日", value=today_jst())
         cost = st.number_input("費用（円）", min_value=0, step=1000, value=0)
         worker = st.text_input("担当者・整備業者", placeholder="例：〇〇農機")
         hour_meter = st.number_input("アワーメーター（h）", min_value=0, step=1, value=0,
@@ -1080,7 +1090,7 @@ elif page == "記録編集" and st.session_state.edit_record_id:
     with st.form("record_edit"):  # 追加フォームと同じ項目を既存値で初期化
         record_type = st.selectbox("記録の種類", RECORD_TYPES, index=rt_idx)
         record_date = st.date_input("実施日",
-                                    value=parse_date(rec.get("record_date")) or date.today())
+                                    value=parse_date(rec.get("record_date")) or today_jst())
         cost = st.number_input("費用（円）", min_value=0, step=1000,
                                value=to_int(rec.get("cost")) or 0)
         worker = st.text_input("担当者・整備業者", value=sval(rec.get("worker")))
@@ -1120,7 +1130,7 @@ elif page == "操作記録追加" and st.session_state.selected_machine_id:
 
     with st.form("op_form", clear_on_submit=True):
         operator = st.text_input("オペレーター名 ＊必須", placeholder="例：田中")
-        operation_date = st.date_input("作業日", value=date.today())
+        operation_date = st.date_input("作業日", value=today_jst())
         duration_hours = st.number_input("稼働時間（h）", min_value=0.0, step=0.5, value=0.0)
         location = st.text_input("作業場所", placeholder="例：第1農場")
         work_content = st.text_area("作業内容", placeholder="例：牧草刈り取り作業")
@@ -1157,7 +1167,7 @@ elif page == "稼働日報編集" and st.session_state.edit_record_id:
     with st.form("op_edit"):  # 追加フォームと同じ項目を既存値で初期化
         operator = st.text_input("オペレーター名 ＊必須", value=sval(op.get("operator")))
         operation_date = st.date_input("作業日",
-                                       value=parse_date(op.get("operation_date")) or date.today())
+                                       value=parse_date(op.get("operation_date")) or today_jst())
         duration_hours = st.number_input("稼働時間（h）", min_value=0.0, step=0.5,
                                          value=to_float(op.get("duration_hours")) or 0.0)
         location = st.text_input("作業場所", value=sval(op.get("location")))
@@ -1203,7 +1213,7 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
         plate_number = st.text_input("ナンバー", value=sval(machine.get("plate_number")))
         serial_number = st.text_input("シリアル番号", value=sval(machine.get("serial_number")))
         purchase_date = st.date_input("購入日", value=purchase_date_value(machine.get("purchase_date")),
-                                      min_value=PURCHASE_MIN_DATE, max_value=date.today())
+                                      min_value=PURCHASE_MIN_DATE, max_value=today_jst())
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000,
                                          value=to_int(machine.get("purchase_price")) or 0)
         notes = st.text_area("メモ", value=sval(machine.get("notes")))
@@ -1536,7 +1546,7 @@ elif page == "施設記録追加" and st.session_state.selected_facility_id:
         repair_location = st.text_input("修繕箇所", placeholder="例：屋根・給水管・換気扇")
         c1, c2 = st.columns(2)
         with c1:
-            record_date = st.date_input("開始日（実施日）", value=date.today())
+            record_date = st.date_input("開始日（実施日）", value=today_jst())
         with c2:
             end_date = st.date_input("終了日（工事期間がある場合）", value=None)
         contractor_type = st.radio("区分", ["自社", "外注"], horizontal=True)
@@ -1587,7 +1597,7 @@ elif page == "施設記録編集" and st.session_state.edit_record_id:
         c1, c2 = st.columns(2)
         with c1:
             record_date = st.date_input("開始日（実施日）",
-                                        value=parse_date(rec.get("record_date")) or date.today())
+                                        value=parse_date(rec.get("record_date")) or today_jst())
         with c2:
             end_date = st.date_input("終了日（工事期間がある場合）",
                                      value=parse_date(rec.get("end_date")))
