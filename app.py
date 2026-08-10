@@ -116,6 +116,23 @@ def parse_date(s):
         return None
 
 
+# 購入日として選べる範囲。古い保有機（1990年代購入）を登録できるようにするため、
+# Streamlit 既定の「今日の前後10年」ではなくここで明示する
+PURCHASE_MIN_DATE = date(1990, 1, 1)
+
+
+def purchase_date_value(s):
+    """台帳の購入日を date_input の初期値にする。範囲外の値は範囲内に丸める。
+
+    範囲外（1990年より前・未来日）のまま value に渡すと Streamlit が例外を投げ、
+    編集画面そのものが開けなくなるため。
+    """
+    d = parse_date(s)
+    if d is None:
+        return None
+    return min(max(d, PURCHASE_MIN_DATE), date.today())
+
+
 # --- 並び替え用のヘルパー ---
 _FAR = 10 ** 9  # 期限なしを最後尾に送るための大きな残日数
 
@@ -895,7 +912,8 @@ elif page == "登録":
         model = st.text_input("型式・モデル", placeholder=("例：SL60" if is_agri else "例：PC30UU-5"))
         plate_number = st.text_input("ナンバー", placeholder="例：山形800 あ 1234")
         serial_number = st.text_input("シリアル番号")
-        purchase_date = st.date_input("購入日", value=None)
+        purchase_date = st.date_input("購入日", value=None,
+                                      min_value=PURCHASE_MIN_DATE, max_value=date.today())
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000, value=0)
         notes = st.text_area("メモ")
 
@@ -1184,7 +1202,8 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
         model = st.text_input("型式・モデル", value=sval(machine.get("model")))
         plate_number = st.text_input("ナンバー", value=sval(machine.get("plate_number")))
         serial_number = st.text_input("シリアル番号", value=sval(machine.get("serial_number")))
-        purchase_date = st.date_input("購入日", value=parse_date(machine.get("purchase_date")))
+        purchase_date = st.date_input("購入日", value=purchase_date_value(machine.get("purchase_date")),
+                                      min_value=PURCHASE_MIN_DATE, max_value=date.today())
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000,
                                          value=to_int(machine.get("purchase_price")) or 0)
         notes = st.text_area("メモ", value=sval(machine.get("notes")))
