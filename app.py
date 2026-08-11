@@ -143,6 +143,24 @@ def purchase_date_value(s):
     return min(max(d, PURCHASE_MIN_DATE), today_jst())
 
 
+def deadline_range():
+    """車検・点検・保険など「期限」の入力で選べる範囲（1990年〜10年先の年末）。
+
+    購入日と違って未来を入れる項目なので上限を先に取る。10年で切るのは
+    2099年のような打ち間違いを止めるため。
+    """
+    return PURCHASE_MIN_DATE, date(today_jst().year + 10, 12, 31)
+
+
+def deadline_value(s):
+    """台帳の期限日を date_input の初期値にする。範囲外の値は範囲内に丸める。"""
+    d = parse_date(s)
+    if d is None:
+        return None
+    lo, hi = deadline_range()
+    return min(max(d, lo), hi)
+
+
 # --- 並び替え用のヘルパー ---
 _FAR = 10 ** 9  # 期限なしを最後尾に送るための大きな残日数
 
@@ -594,7 +612,7 @@ elif page == "ダッシュ":
     # --- 📋 台帳の入力状況 ---
     st.markdown("### 📋 台帳の入力状況")
     st.caption("空欄が多いと、期限アラートが鳴らず、修理費を部門に振り分けるときも「要確認」になります")
-    for label, key in [("配備場所", "location"), ("車検の期限", "next_shaken_date"),
+    for label, key in [("配備場所", "location"), ("車検期日", "next_shaken_date"),
                        ("自賠責の期限", "jibaiseki_expire"), ("任意保険の期限", "insurance_expire")]:
         n = sum(1 for m in live if sval(m_status.get(sval(m.get("id")), {}).get(key)))
         st.progress(n / len(live) if live else 0.0, text=f"{label}：{n} / {len(live)}台")
@@ -768,6 +786,13 @@ elif page == "詳細" and st.session_state.selected_machine_id:
 
     t1, t2, t3, t4, t5 = st.tabs(["📋 基本情報", "📍 状態・保険", "🔧 整備記録", "👤 稼働日報", "🗑️ 廃車・売却"])
 
+    def show_date(label, key):
+        """期限の表示。30日以内なら残り日数を添える（基本情報・状態の両タブで使う）"""
+        v = sval(status.get(key)) if status else ""
+        d = days_until(v)
+        extra = f"　⚠️ あと{d}日" if d is not None and d <= 30 else ""
+        st.markdown(f"**{label}**：{v or '未設定'}{extra}")
+
     # --- 基本情報 ---
     with t1:
         for label, key in [("カテゴリ", "category"), ("メーカー", "manufacturer"),
@@ -775,6 +800,7 @@ elif page == "詳細" and st.session_state.selected_machine_id:
                            ("シリアル番号", "serial_number"), ("購入日", "purchase_date")]:
             st.markdown(f"**{label}**：{sval(machine.get(key)) or '未登録'}")
         st.markdown(f"**購入価格**：{fmt_price(machine.get('purchase_price'))}")
+        show_date("車検期日", "next_shaken_date")
         # 農機だけの項目（作業機・対応作業・燃料・免税軽油）
         if m_is_agri:
             for label, key in [("作業機・アタッチメント", "attachments"),
@@ -789,18 +815,13 @@ elif page == "詳細" and st.session_state.selected_machine_id:
 
     # --- 状態・保険 ---
     with t2:
-        def show_date(label, key):
-            v = sval(status.get(key)) if status else ""
-            d = days_until(v)
-            extra = f"　⚠️ あと{d}日" if d is not None and d <= 30 else ""
-            st.markdown(f"**{label}**：{v or '未設定'}{extra}")
         st.markdown(f"**稼働状態**：{icon} {cur_status}")
         st.markdown(f"**配備場所**：{(sval(status.get('location')) if status else '') or '未設定'}")
         if m_is_agri:
             hm = sval(status.get("hour_meter_current")) if status else ""
             st.markdown(f"**アワーメーター（現在）**：{(hm + ' h') if hm else '未登録'}")
         show_date("次回点検予定", "next_inspection_date")
-        show_date("次回車検", "next_shaken_date")
+        show_date("車検期日", "next_shaken_date")
         st.markdown("---")
         show_date("自賠責 期限", "jibaiseki_expire")
         show_date("任意保険 期限", "insurance_expire")
@@ -925,6 +946,11 @@ elif page == "登録":
         purchase_date = st.date_input("購入日", value=None,
                                       min_value=PURCHASE_MIN_DATE, max_value=today_jst())
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000, value=0)
+        # 車検期日は基本情報として入れる（保存先は machine_status＝状態・保険タブと同じ1つの値）
+        _dl_lo, _dl_hi = deadline_range()
+        next_shaken = st.date_input("車検期日", value=None,
+                                    min_value=_dl_lo, max_value=_dl_hi,
+                                    help="車検証の満了日。車検の無い機械は空欄のままで構いません")
         notes = st.text_area("メモ")
 
         # 農機のときだけ出す項目（作業機・対応作業・燃料・免税軽油・アワーメーター）
@@ -944,12 +970,15 @@ elif page == "登録":
         st.markdown("#### 初期状態")
         initial_status = st.selectbox("稼働状態", STATUSES)
         initial_location = st.text_input("配備場所", placeholder="例：第1農場")
-        next_inspection = st.date_input("次回点検予定日", value=None)
-        next_shaken = st.date_input("次回車検予定日", value=None)
+        # 車検期日は基本情報へ移したのでここには置かない（同じ値を2箇所で入力させない）
+        next_inspection = st.date_input("次回点検予定日", value=None,
+                                        min_value=_dl_lo, max_value=_dl_hi)
 
         st.markdown("#### 保険情報")
-        jibaiseki_exp = st.date_input("自賠責保険 期限", value=None)
-        insurance_exp = st.date_input("任意保険 期限", value=None)
+        jibaiseki_exp = st.date_input("自賠責保険 期限", value=None,
+                                      min_value=_dl_lo, max_value=_dl_hi)
+        insurance_exp = st.date_input("任意保険 期限", value=None,
+                                      min_value=_dl_lo, max_value=_dl_hi)
         insurance_co = st.text_input("保険会社名")
 
         if st.form_submit_button("✅ 登録する", use_container_width=True, type="primary"):
@@ -1005,16 +1034,22 @@ elif page == "状態更新" and st.session_state.selected_machine_id:
         if s_is_agri:
             hm_cur = st.number_input("アワーメーター現在値（h）", min_value=0, step=1,
                                      value=(to_int(status.get("hour_meter_current")) or 0) if status else 0)
+        s_dl_lo, s_dl_hi = deadline_range()
         next_insp = st.date_input("次回点検予定日",
-                                  value=parse_date(status.get("next_inspection_date")) if status else None)
-        next_shaken = st.date_input("次回車検予定日",
-                                    value=parse_date(status.get("next_shaken_date")) if status else None)
+                                  value=deadline_value(status.get("next_inspection_date")) if status else None,
+                                  min_value=s_dl_lo, max_value=s_dl_hi)
+        next_shaken = st.date_input("車検期日",
+                                    value=deadline_value(status.get("next_shaken_date")) if status else None,
+                                    min_value=s_dl_lo, max_value=s_dl_hi,
+                                    help="車検証の満了日。「基本情報」の車検期日と同じ項目です")
 
         st.markdown("#### 保険情報")
         jibaiseki_exp = st.date_input("自賠責保険 期限",
-                                      value=parse_date(status.get("jibaiseki_expire")) if status else None)
+                                      value=deadline_value(status.get("jibaiseki_expire")) if status else None,
+                                      min_value=s_dl_lo, max_value=s_dl_hi)
         insurance_exp = st.date_input("任意保険 期限",
-                                      value=parse_date(status.get("insurance_expire")) if status else None)
+                                      value=deadline_value(status.get("insurance_expire")) if status else None,
+                                      min_value=s_dl_lo, max_value=s_dl_hi)
         insurance_co = st.text_input("保険会社",
                                      value=sval(status.get("insurance_company")) if status else "")
         new_notes = st.text_area("メモ", value=sval(status.get("notes")) if status else "")
@@ -1201,6 +1236,8 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
     e_is_agri = sval(machine.get("machine_type")) == "農機"
     e_cats = AGRI_CATEGORIES if e_is_agri else CATEGORIES
     e_unit = "農機" if e_is_agri else "重機"
+    # 車検期日は machines ではなく machine_status にある項目なので、ここでも読み込む
+    e_status = db.find_one("machine_status", "machine_id", mid)
     st.subheader(f"✏️ 基本情報を編集：{sval(machine.get('name'))}")
 
     with st.form("edit_form"):
@@ -1216,6 +1253,13 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
                                       min_value=PURCHASE_MIN_DATE, max_value=today_jst())
         purchase_price = st.number_input("購入価格（円）", min_value=0, step=10000,
                                          value=to_int(machine.get("purchase_price")) or 0)
+        # 車検期日の保存先は machine_status（状態・保険タブと同じ1つの値を編集している）
+        e_dl_lo, e_dl_hi = deadline_range()
+        next_shaken = st.date_input(
+            "車検期日",
+            value=deadline_value(e_status.get("next_shaken_date")) if e_status else None,
+            min_value=e_dl_lo, max_value=e_dl_hi,
+            help="車検証の満了日。「状態・保険」タブの車検期日と同じ項目です")
         notes = st.text_area("メモ", value=sval(machine.get("notes")))
 
         # 農機のときだけ、農機項目も編集できるようにする
@@ -1254,6 +1298,14 @@ elif page == "基本情報編集" and st.session_state.selected_machine_id:
                         "tax_free_diesel": tax_free or "",
                     })
                 db.update("machines", mid, payload)
+                # 車検期日だけは保存先が別表。状態レコードが無い機械なら作ってから書く
+                shaken_val = str(next_shaken) if next_shaken else ""
+                if e_status:
+                    db.update("machine_status", e_status.get("id"),
+                              {"next_shaken_date": shaken_val})
+                elif shaken_val:
+                    db.insert("machine_status",
+                              {"machine_id": mid, "next_shaken_date": shaken_val})
                 st.success("更新しました！"); nav("詳細"); st.rerun()
 
 # =====================================================
