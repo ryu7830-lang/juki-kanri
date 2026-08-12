@@ -390,7 +390,10 @@ if page == "一覧":
                 # 各カードに不可視アンカー（戻ったときここへスクロールする目印）
                 st.markdown(f'<span id="machine-{m["id"]}"></span>{disp}　{icon} {m["status"]}',
                             unsafe_allow_html=True)
-                st.caption(f"{m['category']}　|　{m['plate_number'] or 'ナンバー未登録'}　|　配備：{m['location']}")
+                # 3つ目の枠は車検期日（配備場所は詳細とダッシュボードの入力状況で見る）。
+                # 未設定も隠さずに出す＝入力すべき機械がその場で分かるようにするため
+                shaken = sval(m["next_shaken_date"]) or "未設定"
+                st.caption(f"{m['category']}　|　{m['plate_number'] or 'ナンバー未登録'}　|　車検期日：{shaken}")
                 for label, d in [("車検", m["next_shaken_date"]), ("自賠責", m["jibaiseki_expire"])]:
                     days = days_until(d)
                     if days is not None:
