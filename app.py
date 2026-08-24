@@ -126,6 +126,38 @@ def parse_date(s):
         return None
 
 
+# --- 実施日が複数日にまたがる記録（整備・修繕）の扱い ---
+# 入力の手間を増やさないため、終了日は「数日かかったときだけ」入れる任意項目にしている。
+# 空欄＝1日で終わった記録。以下の3つの関数がその前提を1か所にまとめている。
+def period_label(start, end):
+    """実施日の表示。終了日があれば「開始 〜 終了（N日間）」、無ければ開始日だけ。"""
+    s, e = sval(start), sval(end)
+    if not e or e == s:
+        return s
+    d1, d2 = parse_date(s), parse_date(e)
+    if d1 and d2 and d2 > d1:
+        return f"{s} 〜 {e}（{(d2 - d1).days + 1}日間）"
+    return f"{s} 〜 {e}"  # 日付として読めない値でも隠さずそのまま見せる
+
+
+def covers_day(rec, d_str):
+    """その記録の期間が指定日（YYYY-MM-DD）にかかっているか。
+    終了日が空なら開始日1日だけ。ISO形式の日付は文字列のまま大小比較できる。"""
+    s = sval(rec.get("record_date"))
+    e = sval(rec.get("end_date")) or s
+    if not s:
+        return False
+    if e < s:  # 開始と終了が逆に入っていても取りこぼさない
+        s, e = e, s
+    return s <= d_str <= e
+
+
+def record_last_day(rec):
+    """その記録で最後に手が入った日（終了日があればそちら）。"""
+    s, e = sval(rec.get("record_date")), sval(rec.get("end_date"))
+    return max(s, e) if e else s
+
+
 # 購入日として選べる範囲。古い保有機（1990年代購入）を登録できるようにするため、
 # Streamlit 既定の「今日の前後10年」ではなくここで明示する
 PURCHASE_MIN_DATE = date(1990, 1, 1)
@@ -445,8 +477,10 @@ elif page == "日別":
     all_recs = db.read("records")
 
     # 「最後に作業したのいつだっけ」用のショートカット（記録のある日だけ並べる）
+    # 整備は開始日と終了日の両方を候補に入れる（数日かかった整備の「終わった日」も拾えるように）
     rec_days = sorted({sval(o.get("operation_date")) for o in all_ops}
-                      | {sval(r.get("record_date")) for r in all_recs}, reverse=True)
+                      | {sval(r.get("record_date")) for r in all_recs}
+                      | {record_last_day(r) for r in all_recs}, reverse=True)
     rec_days = [x for x in rec_days if x][:6]
     if rec_days:
         with st.expander("🕘 記録のある日にジャンプ"):
@@ -485,10 +519,12 @@ elif page == "日別":
 
     ops = [o for o in all_ops
            if sval(o.get("operation_date")) == d_str and keep(o.get("machine_id"))]
+    # 整備は数日にまたがることがあるので、開始日だけでなく「期間がこの日にかかる」記録も拾う
     recs = [r for r in all_recs
-            if sval(r.get("record_date")) == d_str and keep(r.get("machine_id"))]
+            if covers_day(r, d_str) and keep(r.get("machine_id"))]
     ops.sort(key=lambda o: m_label(o.get("machine_id")))
-    recs.sort(key=lambda r: m_label(r.get("machine_id")))
+    # その日に始まった記録が先、前の日から続いている記録は後ろ
+    recs.sort(key=lambda r: (sval(r.get("record_date")) != d_str, m_label(r.get("machine_id"))))
 
     st.divider()
     if not ops and not recs:
@@ -496,7 +532,11 @@ elif page == "日別":
     else:
         # その日の合計（誰がどれだけ動かしたか・いくら整備にかかったかを一目で）
         total_h = sum(to_float(o.get("duration_hours")) or 0 for o in ops)
-        total_cost = sum(to_int(r.get("cost")) or 0 for r in recs)
+        # 費用はその日に始まった記録だけを足す。
+        # 期間中の日にも記録を出すため、全部足すと数日分に同じ費用が重複して乗ってしまう。
+        started = [r for r in recs if sval(r.get("record_date")) == d_str]
+        n_cont = len(recs) - len(started)  # 前の日から続いている整備の件数
+        total_cost = sum(to_int(r.get("cost")) or 0 for r in started)
         c1, c2, c3 = st.columns(3)
         c1.metric("日報のあった台数", f"{len({sval(o.get('machine_id')) for o in ops})}台")
         c2.metric("延べ稼働時間", f"{total_h:.1f}h" if total_h else "—")
@@ -526,12 +566,22 @@ elif page == "日別":
         # --- 整備記録 ---
         if recs:
             st.markdown(f"#### 🔧 整備記録　{len(recs)}件"
+                        + (f"（うち継続 {n_cont}件）" if n_cont else "")
                         + (f"　費用計 {fmt_price(total_cost)}" if total_cost else ""))
             for r in recs:
                 with st.container(border=True):
+                    # 前の日から続いている整備は、費用を見出しに出さない（開始日の分だから）
+                    is_started = sval(r.get("record_date")) == d_str
                     st.markdown(f"**{m_label(r.get('machine_id'))}**"
                                 f"　{sval(r.get('record_type'))}"
-                                + (f"　{fmt_price(r.get('cost'))}" if to_int(r.get("cost")) else ""))
+                                + (f"　{fmt_price(r.get('cost'))}"
+                                   if is_started and to_int(r.get("cost")) else ""))
+                    if not is_started:
+                        st.caption("⏳ 整備期間中："
+                                   f"{period_label(r.get('record_date'), r.get('end_date'))}"
+                                   + ("　／ 費用は開始日に計上" if to_int(r.get("cost")) else ""))
+                    elif sval(r.get("end_date")):
+                        st.caption(f"🔧 この日から：{period_label(r.get('record_date'), r.get('end_date'))}")
                     if sval(r.get("description")):
                         st.write(sval(r.get("description")))
                     caps = []
@@ -702,7 +752,8 @@ elif page == "ダッシュ":
     st.markdown("### ⏱️ しばらく整備記録がない機械")
     last = {}
     for r in records:
-        mid, d = sval(r.get("machine_id")), sval(r.get("record_date"))
+        # 数日かかった整備は終了日が「最後に手が入った日」。空欄なら開始日を使う
+        mid, d = sval(r.get("machine_id")), record_last_day(r)
         if d and (mid not in last or d > last[mid]):
             last[mid] = d
     aged = sorted([(m, last[sval(m.get("id"))]) for m in live if sval(m.get("id")) in last],
@@ -849,7 +900,8 @@ elif page == "詳細" and st.session_state.selected_machine_id:
             c3.metric("累計給油", f"{total_fuel:.0f}L" if total_fuel else "—")
             for r in records:
                 with st.container(border=True):
-                    st.markdown(f"**{sval(r.get('record_type'))}**　{sval(r.get('record_date'))}"
+                    st.markdown(f"**{sval(r.get('record_type'))}**　"
+                                f"{period_label(r.get('record_date'), r.get('end_date'))}"
                                 + (f"　{fmt_price(r.get('cost'))}" if to_int(r.get('cost')) else ""))
                     if sval(r.get("description")):
                         st.write(sval(r.get("description")))
@@ -1087,7 +1139,14 @@ elif page == "記録追加" and st.session_state.selected_machine_id:
 
     with st.form("record_form", clear_on_submit=True):
         record_type = st.selectbox("記録の種類", RECORD_TYPES)
-        record_date = st.date_input("実施日", value=today_jst())
+        # 1日で終わる整備が大半なので、ふだんは開始日だけ入れれば済む形にしている。
+        # 数日かかったときだけ終了日を足す（空欄＝1日）。
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            record_date = st.date_input("開始日（実施日）", value=today_jst())
+        with dc2:
+            end_date = st.date_input("終了日（複数日のときだけ）", value=None,
+                                     help="数日かかった整備のときだけ入れる。1日で終わったら空のままでOK")
         cost = st.number_input("費用（円）", min_value=0, step=1000, value=0)
         worker = st.text_input("担当者・整備業者", placeholder="例：〇〇農機")
         hour_meter = st.number_input("アワーメーター（h）", min_value=0, step=1, value=0,
@@ -1098,15 +1157,20 @@ elif page == "記録追加" and st.session_state.selected_machine_id:
         record_notes = st.text_area("その他メモ")
 
         if st.form_submit_button("✅ 記録を保存する", use_container_width=True, type="primary"):
-            db.insert("records", {
-                "machine_id": mid, "record_type": record_type, "record_date": str(record_date),
-                "description": description or "", "cost": cost if cost > 0 else "",
-                "worker": worker or "", "hour_meter": hour_meter if hour_meter > 0 else "",
-                "fuel_amount": fuel_amount if fuel_amount > 0 else "",
-                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
-                "notes": record_notes or "",
-            })
-            st.success("記録を保存しました！"); nav("詳細"); st.rerun()
+            if end_date and end_date < record_date:
+                st.error("終了日が開始日より前になっています。日付を確かめてください。")
+            else:
+                db.insert("records", {
+                    "machine_id": mid, "record_type": record_type, "record_date": str(record_date),
+                    # 同じ日なら1日で終わった扱い＝終了日は空で保存する
+                    "end_date": str(end_date) if end_date and end_date != record_date else "",
+                    "description": description or "", "cost": cost if cost > 0 else "",
+                    "worker": worker or "", "hour_meter": hour_meter if hour_meter > 0 else "",
+                    "fuel_amount": fuel_amount if fuel_amount > 0 else "",
+                    "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                    "notes": record_notes or "",
+                })
+                st.success("記録を保存しました！"); nav("詳細"); st.rerun()
 
 # =====================================================
 # 整備記録：編集・削除
@@ -1127,8 +1191,14 @@ elif page == "記録編集" and st.session_state.edit_record_id:
     rt_idx = RECORD_TYPES.index(cur_rt) if cur_rt in RECORD_TYPES else 0
     with st.form("record_edit"):  # 追加フォームと同じ項目を既存値で初期化
         record_type = st.selectbox("記録の種類", RECORD_TYPES, index=rt_idx)
-        record_date = st.date_input("実施日",
-                                    value=parse_date(rec.get("record_date")) or today_jst())
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            record_date = st.date_input("開始日（実施日）",
+                                        value=parse_date(rec.get("record_date")) or today_jst())
+        with dc2:
+            end_date = st.date_input("終了日（複数日のときだけ）",
+                                     value=parse_date(rec.get("end_date")),
+                                     help="数日かかった整備のときだけ入れる。1日で終わったら空のままでOK")
         cost = st.number_input("費用（円）", min_value=0, step=1000,
                                value=to_int(rec.get("cost")) or 0)
         worker = st.text_input("担当者・整備業者", value=sval(rec.get("worker")))
@@ -1143,15 +1213,20 @@ elif page == "記録編集" and st.session_state.edit_record_id:
         record_notes = st.text_area("その他メモ", value=sval(rec.get("notes")))
 
         if st.form_submit_button("✅ 更新する", use_container_width=True, type="primary"):
-            db.update("records", rid, {
-                "record_type": record_type, "record_date": str(record_date),
-                "description": description or "", "cost": cost if cost > 0 else "",
-                "worker": worker or "", "hour_meter": hour_meter if hour_meter > 0 else "",
-                "fuel_amount": fuel_amount if fuel_amount > 0 else "",
-                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
-                "notes": record_notes or "",
-            })
-            st.success("更新しました！"); nav("詳細"); st.rerun()
+            if end_date and end_date < record_date:
+                st.error("終了日が開始日より前になっています。日付を確かめてください。")
+            else:
+                db.update("records", rid, {
+                    "record_type": record_type, "record_date": str(record_date),
+                    # 同じ日なら1日で終わった扱い＝終了日は空に戻す（訂正で1日に縮めた場合もここで消える）
+                    "end_date": str(end_date) if end_date and end_date != record_date else "",
+                    "description": description or "", "cost": cost if cost > 0 else "",
+                    "worker": worker or "", "hour_meter": hour_meter if hour_meter > 0 else "",
+                    "fuel_amount": fuel_amount if fuel_amount > 0 else "",
+                    "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                    "notes": record_notes or "",
+                })
+                st.success("更新しました！"); nav("詳細"); st.rerun()
 
     render_delete_section("records", rid, "詳細", label="この整備記録")
 
@@ -1454,11 +1529,9 @@ elif page == "施設詳細" and st.session_state.selected_facility_id:
             c2.metric("累計費用", fmt_price(total_cost))
             for r in frecords:
                 with st.container(border=True):
-                    # 日付（終了日があれば 開始〜終了 の期間表示）
-                    d1 = sval(r.get("record_date"))
-                    d2 = sval(r.get("end_date"))
-                    dstr = f"{d1} 〜 {d2}" if d2 else d1
-                    head = f"**{sval(r.get('record_type'))}**　{dstr}"
+                    # 日付（終了日があれば 開始〜終了（N日間）の期間表示）
+                    head = (f"**{sval(r.get('record_type'))}**　"
+                            f"{period_label(r.get('record_date'), r.get('end_date'))}")
                     if sval(r.get("repair_location")):
                         head += f"　／ 箇所：{sval(r.get('repair_location'))}"
                     if to_int(r.get("cost")):
@@ -1614,18 +1687,22 @@ elif page == "施設記録追加" and st.session_state.selected_facility_id:
         record_notes = st.text_area("その他メモ")
 
         if st.form_submit_button("✅ 記録を保存する", use_container_width=True, type="primary"):
-            db.insert("facility_records", {
-                "facility_id": fid, "record_type": record_type,
-                "repair_location": repair_location or "",
-                "record_date": str(record_date),
-                "end_date": str(end_date) if end_date else "",
-                "contractor_type": contractor_type,
-                "worker": worker or "", "materials": materials or "",
-                "cost": cost if cost > 0 else "", "insurance": insurance or "",
-                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
-                "description": description or "", "notes": record_notes or "",
-            })
-            st.success("記録を保存しました！"); nav("施設詳細"); st.rerun()
+            if end_date and end_date < record_date:
+                st.error("終了日が開始日より前になっています。日付を確かめてください。")
+            else:
+                db.insert("facility_records", {
+                    "facility_id": fid, "record_type": record_type,
+                    "repair_location": repair_location or "",
+                    "record_date": str(record_date),
+                    # 同じ日なら1日で終わった扱い＝終了日は空で保存する
+                    "end_date": str(end_date) if end_date and end_date != record_date else "",
+                    "contractor_type": contractor_type,
+                    "worker": worker or "", "materials": materials or "",
+                    "cost": cost if cost > 0 else "", "insurance": insurance or "",
+                    "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                    "description": description or "", "notes": record_notes or "",
+                })
+                st.success("記録を保存しました！"); nav("施設詳細"); st.rerun()
 
 # =====================================================
 # 🏢 施設：点検・修繕記録の編集・削除
@@ -1668,18 +1745,22 @@ elif page == "施設記録編集" and st.session_state.edit_record_id:
         record_notes = st.text_area("その他メモ", value=sval(rec.get("notes")))
 
         if st.form_submit_button("✅ 更新する", use_container_width=True, type="primary"):
-            db.update("facility_records", rid, {
-                "record_type": record_type,
-                "repair_location": repair_location or "",
-                "record_date": str(record_date),
-                "end_date": str(end_date) if end_date else "",
-                "contractor_type": contractor_type,
-                "worker": worker or "", "materials": materials or "",
-                "cost": cost if cost > 0 else "", "insurance": insurance or "",
-                "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
-                "description": description or "", "notes": record_notes or "",
-            })
-            st.success("更新しました！"); nav("施設詳細"); st.rerun()
+            if end_date and end_date < record_date:
+                st.error("終了日が開始日より前になっています。日付を確かめてください。")
+            else:
+                db.update("facility_records", rid, {
+                    "record_type": record_type,
+                    "repair_location": repair_location or "",
+                    "record_date": str(record_date),
+                    # 同じ日なら1日で終わった扱い＝終了日は空に戻す
+                    "end_date": str(end_date) if end_date and end_date != record_date else "",
+                    "contractor_type": contractor_type,
+                    "worker": worker or "", "materials": materials or "",
+                    "cost": cost if cost > 0 else "", "insurance": insurance or "",
+                    "next_scheduled_date": str(next_scheduled) if next_scheduled else "",
+                    "description": description or "", "notes": record_notes or "",
+                })
+                st.success("更新しました！"); nav("施設詳細"); st.rerun()
 
     render_delete_section("facility_records", rid, "施設詳細", label="この記録")
 
