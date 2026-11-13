@@ -3,6 +3,11 @@ name: keep-awake
 # 重機・農機・施設管理アプリ(Streamlit無料版)は12時間アクセスが無いと居眠りする。
 # 毎朝ヘッドレスブラウザで実際に開いて起こしておく「番人」。
 # GitHubのサーバ上で動くので、手元のMac/Mac miniの電源は不要。
+#
+# 【2026-11-14 追記】GitHubは「公開リポで60日コミットが無い」と予約実行を自動で止める。
+# 実際に 2026-10-23 に止まり、3週間アプリが朝に眠ったままになった（誰も気づかなかった）。
+# 対策として、毎回の最後に「番人自身を有効にし直す」手順を入れている（下の最終ステップ）。
+# また、アプリを起こせなかった回は失敗扱いで終わる＝GitHubから失敗通知が届く。
 
 on:
   schedule:
@@ -28,6 +33,12 @@ on:
     - cron: '20 22 * * *'   # 07:20 JST … 18時まで持たせる便
   workflow_dispatch:   # ボタンからの手動実行も可能（テスト・臨時起こし用）
 
+# 最終ステップで番人自身を有効にし直すため、Actionsへの書き込み権限が要る。
+# それ以外（コードの書き換え等）はできないよう、読み取りだけに絞る。
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   wake:
     runs-on: ubuntu-latest
@@ -48,4 +59,13 @@ jobs:
       - name: アプリを起こす
         env:
           APP_URL: https://ozaki-juki.streamlit.app/
+        # 起こせなかったら keep_awake.py が終了コード1を返す → この回は「失敗」になり通知が届く
         run: python keep_awake.py
+
+      - name: 番人自身を有効にし直す（60日ルールで止まらないように）
+        # 起こすのに失敗した回でも必ず実行する（止まらないことの方が大事なため）。
+        # ここが失敗した場合も「失敗」として通知が届く＝止まる前に気づける。
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/keep-awake.yml/enable"
